@@ -35,6 +35,7 @@ public class WithdrawalService {
     private final FundAccountService fundAccountService;
     private final ApprovalService approvalService;
     private final NotificationService notificationService;
+    private final BusinessAuditLogService auditLogService;
 
     public WithdrawalValidateResultDTO validateWithdrawal(WithdrawalApplyDTO dto) {
         WithdrawalValidateResultDTO result = new WithdrawalValidateResultDTO();
@@ -152,6 +153,13 @@ public class WithdrawalService {
                 applicationNo, employee.getId(), employee.getName(), employee.getBranchId(),
                 dto.getApplicationAmount());
 
+        auditLogService.log(applicationNo, "withdrawal", application.getId(),
+                "SUBMIT", "提交提取申请",
+                dto.getEmployeeId(), employee.getName(), "个人",
+                account.getBalance(), account.getBalance().subtract(dto.getApplicationAmount()), dto.getApplicationAmount().negate(),
+                String.format("提取%.2f元，冻结资金", dto.getApplicationAmount()),
+                null, null, employee.getBranchId(), null);
+
         sendApplicationNotification(employee, application, "提取申请已提交，等待审批");
 
         log.info("提取申请提交成功: applicationNo={}, amount={}", applicationNo, dto.getApplicationAmount());
@@ -180,6 +188,13 @@ public class WithdrawalService {
         application.setApprovedAmount(approvedAmount);
         applicationMapper.updateById(application);
 
+        auditLogService.log(application.getApplicationNo(), "withdrawal", applicationId,
+                "APPROVED", "提取审批通过-资金扣减",
+                null, "SYSTEM", "系统",
+                application.getApplicationAmount(), BigDecimal.ZERO, application.getApplicationAmount().negate(),
+                String.format("扣减冻结资金%.2f元", application.getApplicationAmount()),
+                "YES", null, application.getBranchId(), null);
+
         Employee employee = employeeMapper.selectById(application.getEmployeeId());
         sendApplicationNotification(employee, application,
                 String.format("提取申请已通过审批，审批金额%.2f元，预计3个工作日内到账", approvedAmount));
@@ -199,6 +214,13 @@ public class WithdrawalService {
 
         application.setRejectReason(rejectReason);
         applicationMapper.updateById(application);
+
+        auditLogService.log(application.getApplicationNo(), "withdrawal", applicationId,
+                "REJECTED", "提取审批驳回-资金解冻",
+                null, "SYSTEM", "系统",
+                BigDecimal.ZERO, application.getApplicationAmount(), application.getApplicationAmount(),
+                String.format("驳回，解冻资金%.2f元", application.getApplicationAmount()),
+                "YES", null, application.getBranchId(), rejectReason);
 
         Employee employee = employeeMapper.selectById(application.getEmployeeId());
         sendApplicationNotification(employee, application,

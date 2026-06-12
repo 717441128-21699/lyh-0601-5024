@@ -41,6 +41,7 @@ public class ContributionService {
     private final FundAccountService fundAccountService;
     private final ApprovalService approvalService;
     private final NotificationService notificationService;
+    private final BusinessAuditLogService auditLogService;
 
     public List<ContributionValidateResultDTO> validateContribution(ContributionDeclarationDTO dto) {
         List<ContributionValidateResultDTO> results = new ArrayList<>();
@@ -192,6 +193,13 @@ public class ContributionService {
                 declarationNo, dto.getCompanyId(), company.getCompanyName(), company.getBranchId(),
                 declaration.getTotalAmount());
 
+        auditLogService.log(declarationNo, "contribution", declarationId,
+                "SUBMIT", "提交缴存申报",
+                dto.getCompanyId(), company.getCompanyName(), "单位经办人",
+                BigDecimal.ZERO, declaration.getTotalAmount(), declaration.getTotalAmount(),
+                String.format("单位申报总额%.2f元", declaration.getTotalAmount()),
+                null, null, company.getBranchId(), null);
+
         sendDeclarationNotification(company, declaration, "缴存申报已提交");
 
         log.info("缴存申报提交成功: declarationNo={}, amount={}", declarationNo, declaration.getTotalAmount());
@@ -223,6 +231,13 @@ public class ContributionService {
             detail.setStatus(1);
             detailMapper.updateById(detail);
         }
+
+        auditLogService.log(declaration.getDeclarationNo(), "contribution", declarationId,
+                "APPROVED", "缴存审批通过-资金入账",
+                null, "SYSTEM", "系统",
+                BigDecimal.ZERO, declaration.getTotalAmount(), declaration.getTotalAmount(),
+                String.format("审批通过，%d名职工资金入账", details.size()),
+                "YES", null, declaration.getBranchId(), null);
 
         Company company = companyMapper.selectById(declaration.getCompanyId());
         sendDeclarationNotification(company, declaration, "缴存申报已通过，资金已入账");

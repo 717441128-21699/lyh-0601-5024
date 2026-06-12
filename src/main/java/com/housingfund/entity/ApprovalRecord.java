@@ -33,6 +33,10 @@ public class ApprovalRecord extends BaseEntity {
 
     private String approverRoleName;
 
+    private String ruleVersion;
+
+    private String ruleSnapshot;
+
     private Integer approvalLevel;
 
     private Integer totalLevels;

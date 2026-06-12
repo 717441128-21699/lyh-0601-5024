@@ -3,6 +3,7 @@ package com.housingfund.dto;
 import lombok.Data;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.util.List;
 
 @Data
@@ -19,6 +20,32 @@ public class DashboardDTO {
     private List<TrendItem> overdueTrend;
 
     private OverdueSummary overdueSummary;
+
+    private DrillDownResult drillDown;
+
+    @Data
+    public static class DrillDownResult {
+        private Long branchId;
+        private String branchName;
+        private String dataType;
+        private String dateRange;
+        private List<DrillDownItem> items;
+        private Integer totalCount;
+    }
+
+    @Data
+    public static class DrillDownItem {
+        private String businessNo;
+        private String businessType;
+        private Long businessId;
+        private String businessTypeName;
+        private BigDecimal amount;
+        private String status;
+        private String statusName;
+        private String employeeName;
+        private LocalDate businessDate;
+        private String remark;
+    }
 
     @Data
     public static class BranchComparison {

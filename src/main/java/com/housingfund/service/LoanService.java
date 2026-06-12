@@ -40,6 +40,8 @@ public class LoanService {
     private final RepaymentService repaymentService;
     private final ApprovalService approvalService;
     private final NotificationService notificationService;
+    private final RiskAlertService riskAlertService;
+    private final BusinessAuditLogService auditLogService;
 
     public LoanPreAuditResultDTO preAuditLoan(LoanApplyDTO dto) {
         LoanPreAuditResultDTO result = new LoanPreAuditResultDTO();
@@ -93,6 +95,17 @@ public class LoanService {
         RiskScoreDimensionDTO debtDim = scoreDebt(balance, dto.getApplicationAmount(), dto.getLoanTerm());
         riskDetails.add(debtDim);
 
+        if (debtDim.getActualScore().compareTo(new BigDecimal("5")) <= 0
+                && debtDim.getActualScore().compareTo(BigDecimal.ZERO) > 0) {
+            riskAlertService.createAlert(
+                    RiskAlertTypeEnum.DEBT_ABNORMAL, "LOAN_PRE_AUDIT",
+                    "PRE_AUDIT_" + dto.getEmployeeId(), "loan", null,
+                    dto.getEmployeeId(), employee.getName(), employee.getBranchId(),
+                    "贷款申请人负债异常",
+                    String.format("职工%s负债比率异常，负债评分仅%.0f分（满分20分）", employee.getName(), debtDim.getActualScore()),
+                    debtDim.getActualScore(), new BigDecimal("5"));
+        }
+
         RiskScoreDimensionDTO houseDim = scoreHouseValuation(dto.getHouseAppraisalValue(), dto.getApplicationAmount(), lc);
         riskDetails.add(houseDim);
 
@@ -102,6 +115,16 @@ public class LoanService {
         }
         result.setRiskScoreDetails(riskDetails);
         result.setRiskTotalScore(totalScore);
+
+        if (totalScore.compareTo(new BigDecimal("60")) < 0 && totalScore.compareTo(BigDecimal.ZERO) > 0) {
+            riskAlertService.createAlert(
+                    RiskAlertTypeEnum.LOW_RISK_SCORE, "LOAN_PRE_AUDIT",
+                    "PRE_AUDIT_" + dto.getEmployeeId(), "loan", null,
+                    dto.getEmployeeId(), employee.getName(), employee.getBranchId(),
+                    "贷款预审评分过低",
+                    String.format("职工%s预审风控评分%.2f分，低于60分警戒线", employee.getName(), totalScore),
+                    totalScore, new BigDecimal("60"));
+        }
 
         BigDecimal balanceBasedMax = balance.multiply(new BigDecimal("15"))
                 .setScale(2, RoundingMode.HALF_DOWN);
@@ -453,6 +476,14 @@ public class LoanService {
                 applicationNo, employee.getId(), employee.getName(), employee.getBranchId(),
                 dto.getApplicationAmount());
 
+        auditLogService.log(applicationNo, "loan", application.getId(),
+                "PRE_AUDIT", "贷款预审通过",
+                dto.getEmployeeId(), employee.getName(), "个人",
+                BigDecimal.ZERO, preAudit.getMaxLoanableAmount(), preAudit.getMaxLoanableAmount(),
+                String.format("最高可贷%.2f元，利率%.4f，风控评分%.2f",
+                        preAudit.getMaxLoanableAmount(), preAudit.getInterestRate(), preAudit.getRiskTotalScore()),
+                null, null, employee.getBranchId(), null);
+
         sendLoanNotification(employee, application, "贷款申请已提交，预审通过，等待审批");
 
         log.info("贷款申请提交成功: applicationNo={}, amount={}", applicationNo, dto.getApplicationAmount());
@@ -470,6 +501,13 @@ public class LoanService {
 
         LoanAccount loanAccount = repaymentService.createLoanAccount(application);
         repaymentService.generateRepaymentPlan(loanAccount);
+
+        auditLogService.log(application.getApplicationNo(), "loan", applicationId,
+                "APPROVED", "贷款审批通过-生成还款计划",
+                null, "SYSTEM", "系统",
+                BigDecimal.ZERO, approvedAmount, approvedAmount,
+                String.format("批准金额%.2f元，期限%d年，利率%.4f", approvedAmount, application.getLoanTerm(), application.getInterestRate()),
+                "YES", null, application.getBranchId(), null);
 
         Employee employee = employeeMapper.selectById(application.getEmployeeId());
         sendLoanNotification(employee, application,

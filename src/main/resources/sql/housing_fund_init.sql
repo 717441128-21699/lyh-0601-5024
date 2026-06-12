@@ -399,6 +399,8 @@ CREATE TABLE approval_record (
     approver_name VARCHAR(50) COMMENT '审批人姓名',
     approver_role_id BIGINT COMMENT '审批人角色ID',
     approver_role_name VARCHAR(50) COMMENT '审批人角色名称',
+    rule_version VARCHAR(50) COMMENT '规则版本',
+    rule_snapshot VARCHAR(500) COMMENT '规则快照',
     approval_level INT NOT NULL COMMENT '审批层级',
     total_levels INT NOT NULL COMMENT '审批总层级',
     approval_action TINYINT DEFAULT 0 COMMENT '审批动作 0待处理 1处理中',
@@ -438,6 +440,9 @@ CREATE TABLE approval_rule_config (
     escalation_type VARCHAR(30) COMMENT '加签类型',
     sort_order INT DEFAULT 0 COMMENT '排序',
     status TINYINT DEFAULT 1 COMMENT '状态 1启用 0停用',
+    effective_time DATETIME COMMENT '生效时间',
+    expiry_time DATETIME COMMENT '失效时间',
+    rule_version VARCHAR(50) COMMENT '规则版本',
     remark VARCHAR(500) COMMENT '备注',
     create_time DATETIME COMMENT '创建时间',
     update_time DATETIME COMMENT '更新时间',
@@ -445,7 +450,9 @@ CREATE TABLE approval_rule_config (
     update_by VARCHAR(50) COMMENT '更新人',
     deleted TINYINT DEFAULT 0 COMMENT '逻辑删除',
     INDEX idx_business_type (business_type),
-    INDEX idx_approval_level (business_type, approval_level)
+    INDEX idx_approval_level (business_type, approval_level),
+    INDEX idx_rule_version (business_type, rule_version),
+    INDEX idx_effective_time (effective_time, expiry_time)
 ) ENGINE=InnoDB COMMENT='审批规则配置表';
 
 DROP TABLE IF EXISTS collection_task;
@@ -569,6 +576,42 @@ CREATE TABLE notification_record (
 -- 八、风控评分明细表
 -- ============================================================
 
+DROP TABLE IF EXISTS business_audit_log;
+CREATE TABLE business_audit_log (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
+    trace_no VARCHAR(32) NOT NULL UNIQUE COMMENT '审计追踪号',
+    business_no VARCHAR(32) NOT NULL COMMENT '业务单号',
+    business_type VARCHAR(30) NOT NULL COMMENT '业务类型: contribution/withdrawal/loan/repayment',
+    business_id BIGINT COMMENT '业务ID',
+    action_code VARCHAR(30) NOT NULL COMMENT '动作编码: SUBMIT/APPROVED/REJECTED/PRE_AUDIT/REPAY/EARLY_REPAYMENT_FULL/EARLY_REPAYMENT_PARTIAL/APPROVAL_2/APPROVAL_3',
+    action_name VARCHAR(50) NOT NULL COMMENT '动作名称',
+    operator_id BIGINT COMMENT '操作人ID',
+    operator_name VARCHAR(50) COMMENT '操作人姓名',
+    operator_role VARCHAR(50) COMMENT '操作人角色',
+    amount_before DECIMAL(16,2) COMMENT '变动前金额',
+    amount_after DECIMAL(16,2) COMMENT '变动后金额',
+    amount_changed DECIMAL(16,2) COMMENT '变动金额',
+    change_description VARCHAR(500) COMMENT '变动描述',
+    notification_triggered VARCHAR(10) COMMENT '是否触发通知: YES/NO',
+    notification_id BIGINT COMMENT '通知记录ID',
+    remark VARCHAR(500) COMMENT '备注',
+    branch_id BIGINT COMMENT '所属分支机构',
+    action_time DATETIME COMMENT '操作时间',
+    status TINYINT DEFAULT 1 COMMENT '状态',
+    create_time DATETIME COMMENT '创建时间',
+    update_time DATETIME COMMENT '更新时间',
+    create_by VARCHAR(50) COMMENT '创建人',
+    update_by VARCHAR(50) COMMENT '更新人',
+    deleted TINYINT DEFAULT 0 COMMENT '逻辑删除',
+    INDEX idx_trace_no (trace_no),
+    INDEX idx_business_no (business_no),
+    INDEX idx_business (business_type, business_id),
+    INDEX idx_action_code (action_code),
+    INDEX idx_operator_id (operator_id),
+    INDEX idx_action_time (action_time),
+    INDEX idx_branch_id (branch_id)
+) ENGINE=InnoDB COMMENT='业务审计流水表';
+
 DROP TABLE IF EXISTS loan_risk_score_detail;
 CREATE TABLE loan_risk_score_detail (
     id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
@@ -614,18 +657,30 @@ CREATE TABLE approval_rule_config (
     timeout_hours INT COMMENT '超时时间(小时)，null则使用系统默认',
     sort_order INT DEFAULT 0 COMMENT '排序',
     status TINYINT DEFAULT 1 COMMENT '状态 1启用 0停用',
+    effective_time DATETIME COMMENT '生效时间',
+    expiry_time DATETIME COMMENT '失效时间',
+    rule_version VARCHAR(50) COMMENT '规则版本',
     create_time DATETIME COMMENT '创建时间',
     update_time DATETIME COMMENT '更新时间',
     create_by VARCHAR(50) COMMENT '创建人',
     update_by VARCHAR(50) COMMENT '更新人',
     deleted TINYINT DEFAULT 0 COMMENT '逻辑删除',
     INDEX idx_business_type (business_type),
-    INDEX idx_approval_level (approval_level)
+    INDEX idx_approval_level (approval_level),
+    INDEX idx_rule_version (business_type, rule_version),
+    INDEX idx_effective_time (effective_time, expiry_time)
 ) ENGINE=InnoDB COMMENT='审批规则配置表';
 
 -- 修改approval_record表，新增审批人角色字段
 ALTER TABLE approval_record ADD COLUMN approver_role_id BIGINT COMMENT '审批人角色ID' AFTER approver_name;
 ALTER TABLE approval_record ADD COLUMN approver_role_name VARCHAR(50) COMMENT '审批人角色名称' AFTER approver_role_id;
+ALTER TABLE approval_record ADD COLUMN rule_version VARCHAR(50) COMMENT '规则版本' AFTER approver_role_name;
+ALTER TABLE approval_record ADD COLUMN rule_snapshot VARCHAR(500) COMMENT '规则快照' AFTER rule_version;
+
+-- 修改approval_rule_config表，新增灰度生效字段
+ALTER TABLE approval_rule_config ADD COLUMN effective_time DATETIME COMMENT '生效时间' AFTER status;
+ALTER TABLE approval_rule_config ADD COLUMN expiry_time DATETIME COMMENT '失效时间' AFTER effective_time;
+ALTER TABLE approval_rule_config ADD COLUMN rule_version VARCHAR(50) COMMENT '规则版本' AFTER expiry_time;
 
 -- ============================================================
 -- 十、审批规则初始化数据
@@ -673,3 +728,88 @@ INSERT INTO fund_account (account_no, account_type, employee_id, company_id, bra
 ('FA0000005', 'PERSONAL', 5, 3, 5, 864000.00, 0, 864000.00, 0, 432000.00, 432000.00, 0, 1);
 
 COMMIT;
+
+-- ============================================================
+-- 十二、风险预警事件表
+-- ============================================================
+
+DROP TABLE IF EXISTS risk_alert_event;
+CREATE TABLE risk_alert_event (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
+    alert_no VARCHAR(32) NOT NULL UNIQUE COMMENT '预警编号',
+    alert_type VARCHAR(30) NOT NULL COMMENT '预警类型编码',
+    alert_type_name VARCHAR(50) COMMENT '预警类型名称',
+    alert_level VARCHAR(20) COMMENT '预警等级: HIGH/MEDIUM/LOW',
+    alert_source VARCHAR(30) COMMENT '预警来源',
+    business_no VARCHAR(32) COMMENT '关联业务单号',
+    business_type VARCHAR(30) COMMENT '关联业务类型',
+    business_id BIGINT COMMENT '关联业务ID',
+    employee_id BIGINT COMMENT '职工ID',
+    employee_name VARCHAR(50) COMMENT '职工姓名',
+    branch_id BIGINT COMMENT '所属分支机构',
+    alert_title VARCHAR(200) COMMENT '预警标题',
+    alert_content TEXT COMMENT '预警内容',
+    alert_value DECIMAL(16,2) COMMENT '预警指标值',
+    threshold_value DECIMAL(16,2) COMMENT '阈值',
+    alert_status VARCHAR(20) DEFAULT 'PENDING' COMMENT '预警状态: PENDING待处理 PROCESSING处理中 RESOLVED已处理 FALSE_POSITIVE误报 ESCALATED转人工复核',
+    handler_id BIGINT COMMENT '处理人ID',
+    handler_name VARCHAR(50) COMMENT '处理人姓名',
+    handle_time DATETIME COMMENT '处理时间',
+    handle_result VARCHAR(30) COMMENT '处理结果',
+    handle_remark VARCHAR(500) COMMENT '处理备注',
+    resolve_deadline DATETIME COMMENT '要求处理截止时间',
+    status TINYINT DEFAULT 1 COMMENT '状态 1有效 0无效',
+    create_time DATETIME COMMENT '创建时间',
+    update_time DATETIME COMMENT '更新时间',
+    create_by VARCHAR(50) COMMENT '创建人',
+    update_by VARCHAR(50) COMMENT '更新人',
+    deleted TINYINT DEFAULT 0 COMMENT '逻辑删除',
+    INDEX idx_alert_no (alert_no),
+    INDEX idx_alert_type (alert_type),
+    INDEX idx_alert_status (alert_status),
+    INDEX idx_business_no (business_no),
+    INDEX idx_employee_id (employee_id),
+    INDEX idx_branch_id (branch_id),
+    INDEX idx_alert_level (alert_level),
+    INDEX idx_resolve_deadline (resolve_deadline)
+) ENGINE=InnoDB COMMENT='风险预警事件表';
+
+-- ============================================================
+-- 十三、业务审计流水表
+-- ============================================================
+
+DROP TABLE IF EXISTS business_audit_log;
+CREATE TABLE business_audit_log (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
+    trace_no VARCHAR(32) NOT NULL COMMENT '追踪号',
+    business_no VARCHAR(32) NOT NULL COMMENT '业务单号',
+    business_type VARCHAR(30) NOT NULL COMMENT '业务类型: contribution/withdrawal/loan/repayment/approval',
+    business_id BIGINT COMMENT '业务ID',
+    action_code VARCHAR(30) NOT NULL COMMENT '动作编码',
+    action_name VARCHAR(50) COMMENT '动作名称',
+    operator_id BIGINT COMMENT '操作人ID',
+    operator_name VARCHAR(50) COMMENT '操作人姓名',
+    operator_role VARCHAR(50) COMMENT '操作人角色',
+    amount_before DECIMAL(16,2) COMMENT '操作前金额',
+    amount_after DECIMAL(16,2) COMMENT '操作后金额',
+    amount_changed DECIMAL(16,2) COMMENT '变化金额',
+    change_description VARCHAR(500) COMMENT '变化描述',
+    notification_triggered VARCHAR(10) COMMENT '是否触发通知: YES/NO',
+    notification_id BIGINT COMMENT '触发通知ID',
+    remark VARCHAR(500) COMMENT '备注',
+    branch_id BIGINT COMMENT '所属分支机构',
+    action_time DATETIME NOT NULL COMMENT '操作时间',
+    status TINYINT DEFAULT 1 COMMENT '状态 1有效 0无效',
+    create_time DATETIME COMMENT '创建时间',
+    update_time DATETIME COMMENT '更新时间',
+    create_by VARCHAR(50) COMMENT '创建人',
+    update_by VARCHAR(50) COMMENT '更新人',
+    deleted TINYINT DEFAULT 0 COMMENT '逻辑删除',
+    INDEX idx_trace_no (trace_no),
+    INDEX idx_business_no (business_no),
+    INDEX idx_business (business_type, business_id),
+    INDEX idx_action_code (action_code),
+    INDEX idx_operator_id (operator_id),
+    INDEX idx_action_time (action_time),
+    INDEX idx_branch_id (branch_id)
+) ENGINE=InnoDB COMMENT='业务审计流水表';

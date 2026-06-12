@@ -12,6 +12,7 @@ import com.housingfund.dto.RepaymentPlanResultDTO;
 import com.housingfund.entity.*;
 import com.housingfund.enums.NotificationTypeEnum;
 import com.housingfund.enums.RepaymentStatusEnum;
+import com.housingfund.enums.RiskAlertTypeEnum;
 import com.housingfund.mapper.*;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -37,7 +38,9 @@ public class RepaymentService {
     private final CollectionTaskMapper collectionTaskMapper;
     private final EmployeeMapper employeeMapper;
     private final NotificationService notificationService;
+    private final RiskAlertService riskAlertService;
     private final FundAccountService fundAccountService;
+    private final BusinessAuditLogService auditLogService;
 
     @Transactional(rollbackFor = Exception.class)
     public LoanAccount createLoanAccount(LoanApplication application) {
@@ -293,6 +296,14 @@ public class RepaymentService {
             );
         }
 
+        auditLogService.log(plan.getLoanAccountNo(), "repayment", plan.getLoanAccountId(),
+                "REPAY", "正常还款",
+                account.getEmployeeId(), employee != null ? employee.getName() : "", "个人",
+                account.getRemainingPrincipal().add(plan.getPrincipalAmount()), account.getRemainingPrincipal(), plan.getPrincipalAmount().negate(),
+                String.format("第%d期还款%.2f元%s", plan.getTermNo(), plan.getTotalAmount(),
+                        plan.getPenaltyAmount().compareTo(BigDecimal.ZERO) > 0 ? String.format("(含罚息%.2f)", plan.getPenaltyAmount()) : ""),
+                "YES", null, account.getBranchId(), null);
+
         log.info("还款处理完成: loanAccountId={}, term={}, amount={}",
                 plan.getLoanAccountId(), plan.getTermNo(), plan.getTotalAmount());
     }
@@ -392,6 +403,17 @@ public class RepaymentService {
                             totalOverduePrincipal, totalOverdueInterest, totalPenalty);
 
                     sendOverdueAlert(account, totalOverdueDays, totalOverdueAmount, totalPenalty);
+
+                    Employee emp = employeeMapper.selectById(account.getEmployeeId());
+                    riskAlertService.createAlert(
+                            RiskAlertTypeEnum.OVERDUE_RISING, "OVERDUE_CHECK",
+                            account.getLoanAccountNo(), "repayment", account.getId(),
+                            account.getEmployeeId(), emp != null ? emp.getName() : "", account.getBranchId(),
+                            "贷款逾期预警",
+                            String.format("贷款账户%s逾期%d天，累计欠款%.2f元",
+                                    account.getLoanAccountNo(), totalOverdueDays, totalOverdueAmount),
+                            BigDecimal.valueOf(totalOverdueDays), BigDecimal.valueOf(30));
+
                     overdueCount++;
                 }
             } catch (Exception e) {
@@ -572,6 +594,15 @@ public class RepaymentService {
                 loanAccountMapper.updateById(account);
 
                 deductFromFundAccount(account, earlyRepaymentAmount);
+
+                Employee employee = employeeMapper.selectById(account.getEmployeeId());
+                auditLogService.log(account.getLoanAccountNo(), "repayment", account.getId(),
+                        "EARLY_REPAYMENT_FULL", "全额提前还款",
+                        account.getEmployeeId(), employee != null ? employee.getName() : "", "个人",
+                        remainingPrincipal, BigDecimal.ZERO, earlyRepaymentAmount.negate(),
+                        String.format("全额提前还款%.2f元，贷款结清", earlyRepaymentAmount),
+                        "YES", null, account.getBranchId(), null);
+
                 sendEarlyRepaymentNotification(account, true, earlyRepaymentAmount, BigDecimal.ZERO, 0);
             }
         } else {
@@ -650,6 +681,27 @@ public class RepaymentService {
                 loanAccountMapper.updateById(account);
 
                 deductFromFundAccount(account, earlyRepaymentAmount);
+
+                if (earlyRepaymentAmount.compareTo(remainingPrincipal.multiply(new BigDecimal("0.5"))) > 0) {
+                    Employee emp = employeeMapper.selectById(account.getEmployeeId());
+                    riskAlertService.createAlert(
+                            RiskAlertTypeEnum.EARLY_REPAYMENT_ABNORMAL, "EARLY_REPAYMENT",
+                            account.getLoanAccountNo(), "repayment", account.getId(),
+                            account.getEmployeeId(), emp != null ? emp.getName() : "", account.getBranchId(),
+                            "部分提前还款金额异常",
+                            String.format("贷款账户%s部分提前还款%.2f元，超过剩余本金50%%(%.2f元)",
+                                    account.getLoanAccountNo(), earlyRepaymentAmount, remainingPrincipal.multiply(new BigDecimal("0.5"))),
+                            earlyRepaymentAmount, remainingPrincipal.multiply(new BigDecimal("0.5")));
+                }
+
+                Employee employee = employeeMapper.selectById(account.getEmployeeId());
+                auditLogService.log(account.getLoanAccountNo(), "repayment", account.getId(),
+                        "EARLY_REPAYMENT_PARTIAL", "部分提前还款",
+                        account.getEmployeeId(), employee != null ? employee.getName() : "", "个人",
+                        remainingPrincipal, remainingPrincipalAfter, earlyRepaymentAmount.negate(),
+                        String.format("部分提前还款%.2f元，剩余%d期，新月供%.2f元", earlyRepaymentAmount, newRemainingTerm, newMonthlyPayment),
+                        "YES", null, account.getBranchId(), null);
+
                 sendEarlyRepaymentNotification(account, false, earlyRepaymentAmount, newMonthlyPayment, newRemainingTerm);
             }
         }

@@ -44,11 +44,12 @@ public class ApprovalService {
     private final ContributionService contributionService;
     private final WithdrawalService withdrawalService;
     private final LoanService loanService;
+    private final BusinessAuditLogService auditLogService;
 
     @Transactional(rollbackFor = Exception.class)
     public void initApprovalProcess(Long businessId, String businessType, String businessNo,
                                     Long applicantId, String applicantName, Long branchId, BigDecimal amount) {
-        List<ApprovalRuleConfig> rules = approvalRuleConfigMapper.findByBusinessType(businessType);
+        List<ApprovalRuleConfig> rules = approvalRuleConfigMapper.findByBusinessType(businessType, LocalDateTime.now());
 
         if (rules != null && !rules.isEmpty()) {
             initRuleBasedApproval(businessId, businessType, businessNo, applicantId, applicantName, branchId, amount, rules);
@@ -94,6 +95,8 @@ public class ApprovalService {
             record.setStatus(level == 1 ? 1 : 0);
             record.setApproverRoleId(cfg.getApproverRoleId());
             record.setApproverRoleName(cfg.getApproverRoleName());
+            record.setRuleVersion(cfg.getRuleVersion());
+            record.setRuleSnapshot(buildRuleSnapshot(cfg));
             approvalRecordMapper.insert(record);
             level++;
         }
@@ -147,6 +150,15 @@ public class ApprovalService {
         record.setApprovalTime(LocalDateTime.now());
         record.setStatus(2);
         approvalRecordMapper.updateById(record);
+
+        auditLogService.log(record.getBusinessNo(), record.getBusinessType(), record.getBusinessId(),
+                "APPROVAL_" + dto.getApprovalResult(),
+                dto.getApprovalResult() == 2 ? "审批通过" : dto.getApprovalResult() == 3 ? "审批驳回" : "审批转办",
+                dto.getApproverId(), dto.getApproverName(), record.getApproverRoleName(),
+                null, null, null,
+                String.format("第%d级审批(%d/%d)，意见：%s", dto.getApprovalLevel(), dto.getApprovalLevel(), record.getTotalLevels(),
+                        dto.getApprovalComment() != null ? dto.getApprovalComment() : "无"),
+                "YES", null, record.getBranchId(), null);
 
         if (dto.getApprovalResult() == 2) {
             processApprovalPassed(dto);
@@ -283,5 +295,17 @@ public class ApprovalService {
 
     public List<ApprovalRecord> getApprovalHistory(Long businessId, String businessType) {
         return approvalRecordMapper.findByBusiness(businessId, businessType);
+    }
+
+    private String buildRuleSnapshot(ApprovalRuleConfig cfg) {
+        return String.format("层级%d|%s|%s|阈值%.2f|加签%s|加签阈值%.2f|超时%dh|版本%s",
+                cfg.getApprovalLevel(),
+                cfg.getLevelName() != null ? cfg.getLevelName() : "",
+                cfg.getApproverRoleName() != null ? cfg.getApproverRoleName() : "",
+                cfg.getAmountThreshold() != null ? cfg.getAmountThreshold() : BigDecimal.ZERO,
+                Boolean.TRUE.equals(cfg.getAutoEscalation()) ? "是" : "否",
+                cfg.getEscalationThreshold() != null ? cfg.getEscalationThreshold() : BigDecimal.ZERO,
+                cfg.getTimeoutHours() != null ? cfg.getTimeoutHours() : 4,
+                cfg.getRuleVersion() != null ? cfg.getRuleVersion() : "DEFAULT");
     }
 }

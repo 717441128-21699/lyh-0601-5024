@@ -5,6 +5,7 @@ import lombok.Data;
 import lombok.EqualsAndHashCode;
 
 import java.math.BigDecimal;
+import java.time.LocalDateTime;
 
 @Data
 @EqualsAndHashCode(callSuper = true)
@@ -36,4 +37,10 @@ public class ApprovalRuleConfig extends BaseEntity {
     private Integer sortOrder;
 
     private Integer status;
+
+    private LocalDateTime effectiveTime;
+
+    private LocalDateTime expiryTime;
+
+    private String ruleVersion;
 }

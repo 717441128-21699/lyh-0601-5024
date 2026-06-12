@@ -84,4 +84,13 @@ public class FundReportController {
             @Parameter(description = "查询月数") @RequestParam(required = false, defaultValue = "12") Integer months) {
         return Result.success(fundReportService.getDashboard(branchId, months));
     }
+
+    @Operation(summary = "驾驶舱数据钻取", description = "从分支机构汇总点击进入业务明细列表，返回含业务单号和类型的明细数据，可直接跳转详情页")
+    @GetMapping("/dashboard/drill-down")
+    public Result<DashboardDTO.DrillDownResult> drillDown(
+            @Parameter(description = "分支机构ID，null查全辖") @RequestParam(required = false) Long branchId,
+            @Parameter(description = "数据类型: contribution/withdrawal/loan/overdue") @RequestParam String dataType,
+            @Parameter(description = "月份(yyyy-MM)") @RequestParam(required = false) String month) {
+        return Result.success(fundReportService.drillDown(branchId, dataType, month));
+    }
 }

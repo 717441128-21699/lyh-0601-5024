@@ -430,6 +430,135 @@ public class FundReportService {
         return dto;
     }
 
+    public DashboardDTO.DrillDownResult drillDown(Long branchId, String dataType, String month) {
+        DashboardDTO.DrillDownResult result = new DashboardDTO.DrillDownResult();
+        result.setBranchId(branchId);
+
+        Branch branch = null;
+        if (branchId != null) {
+            branch = branchMapper.selectById(branchId);
+            result.setBranchName(branch != null ? branch.getBranchName() : "");
+        } else {
+            result.setBranchName("全辖");
+        }
+
+        result.setDataType(dataType);
+        result.setDateRange(month);
+
+        YearMonth ym = month != null ? YearMonth.parse(month) : YearMonth.now();
+        LocalDate monthStart = ym.atDay(1);
+        LocalDate monthEnd = ym.atEndOfMonth();
+        LocalDateTime monthStartDT = monthStart.atStartOfDay();
+        LocalDateTime monthEndDT = monthEnd.atTime(23, 59, 59);
+
+        List<DashboardDTO.DrillDownItem> items = new ArrayList<>();
+
+        switch (dataType) {
+            case "contribution" -> {
+                LambdaQueryWrapper<ContributionDetail> wrapper = new LambdaQueryWrapper<>();
+                if (branchId != null) wrapper.eq(ContributionDetail::getBranchId, branchId);
+                wrapper.ge(ContributionDetail::getContributionMonth, monthStart)
+                        .le(ContributionDetail::getContributionMonth, monthEnd)
+                        .eq(ContributionDetail::getStatus, 1)
+                        .orderByDesc(ContributionDetail::getCreateTime);
+                List<ContributionDetail> details = contributionDetailMapper.selectList(wrapper);
+                for (ContributionDetail d : details) {
+                    DashboardDTO.DrillDownItem item = new DashboardDTO.DrillDownItem();
+                    item.setBusinessNo(d.getDeclarationNo());
+                    item.setBusinessType("contribution");
+                    item.setBusinessId(d.getDeclarationId());
+                    item.setBusinessTypeName("缴存");
+                    item.setAmount(d.getTotalAmount());
+                    item.setStatus(d.getStatus() != null ? String.valueOf(d.getStatus()) : "0");
+                    item.setStatusName(d.getStatus() == 1 ? "已入账" : "待入账");
+                    item.setEmployeeName(d.getEmployeeName());
+                    item.setBusinessDate(d.getContributionMonth());
+                    items.add(item);
+                }
+            }
+            case "withdrawal" -> {
+                LambdaQueryWrapper<WithdrawalApplication> wrapper = new LambdaQueryWrapper<>();
+                if (branchId != null) wrapper.eq(WithdrawalApplication::getBranchId, branchId);
+                wrapper.ge(WithdrawalApplication::getCreateTime, monthStartDT)
+                        .le(WithdrawalApplication::getCreateTime, monthEndDT)
+                        .orderByDesc(WithdrawalApplication::getCreateTime);
+                List<WithdrawalApplication> apps = withdrawalMapper.selectList(wrapper);
+                for (WithdrawalApplication a : apps) {
+                    DashboardDTO.DrillDownItem item = new DashboardDTO.DrillDownItem();
+                    item.setBusinessNo(a.getApplicationNo());
+                    item.setBusinessType("withdrawal");
+                    item.setBusinessId(a.getId());
+                    item.setBusinessTypeName("提取");
+                    item.setAmount(a.getApplicationAmount());
+                    item.setStatus(String.valueOf(a.getApprovalStatus()));
+                    item.setStatusName(mapApprovalStatus(a.getApprovalStatus()));
+                    item.setEmployeeName(a.getEmployeeName());
+                    item.setBusinessDate(a.getCreateTime() != null ? a.getCreateTime().toLocalDate() : null);
+                    items.add(item);
+                }
+            }
+            case "loan" -> {
+                LambdaQueryWrapper<LoanApplication> wrapper = new LambdaQueryWrapper<>();
+                if (branchId != null) wrapper.eq(LoanApplication::getBranchId, branchId);
+                wrapper.ge(LoanApplication::getCreateTime, monthStartDT)
+                        .le(LoanApplication::getCreateTime, monthEndDT)
+                        .orderByDesc(LoanApplication::getCreateTime);
+                List<LoanApplication> apps = loanMapper.selectList(wrapper);
+                for (LoanApplication a : apps) {
+                    DashboardDTO.DrillDownItem item = new DashboardDTO.DrillDownItem();
+                    item.setBusinessNo(a.getApplicationNo());
+                    item.setBusinessType("loan");
+                    item.setBusinessId(a.getId());
+                    item.setBusinessTypeName("贷款");
+                    item.setAmount(a.getApplicationAmount());
+                    item.setStatus(String.valueOf(a.getApprovalStatus()));
+                    item.setStatusName(mapApprovalStatus(a.getApprovalStatus()));
+                    item.setEmployeeName(a.getEmployeeName());
+                    item.setBusinessDate(a.getCreateTime() != null ? a.getCreateTime().toLocalDate() : null);
+                    items.add(item);
+                }
+            }
+            case "overdue" -> {
+                LambdaQueryWrapper<LoanAccount> wrapper = new LambdaQueryWrapper<>();
+                if (branchId != null) wrapper.eq(LoanAccount::getBranchId, branchId);
+                wrapper.eq(LoanAccount::getRepaymentStatus, 3);
+                wrapper.orderByDesc(LoanAccount::getOverdueDays);
+                List<LoanAccount> accounts = loanAccountMapper.selectList(wrapper);
+                for (LoanAccount a : accounts) {
+                    Employee emp = employeeMapper.selectById(a.getEmployeeId());
+                    DashboardDTO.DrillDownItem item = new DashboardDTO.DrillDownItem();
+                    item.setBusinessNo(a.getLoanAccountNo());
+                    item.setBusinessType("loan_account");
+                    item.setBusinessId(a.getId());
+                    item.setBusinessTypeName("逾期贷款");
+                    item.setAmount(a.getRemainingPrincipal());
+                    item.setStatus(String.valueOf(a.getRepaymentStatus()));
+                    item.setStatusName("逾期" + a.getOverdueDays() + "天");
+                    item.setEmployeeName(emp != null ? emp.getName() : "");
+                    item.setBusinessDate(a.getLastRepaymentDate());
+                    items.add(item);
+                }
+            }
+        }
+
+        result.setItems(items);
+        result.setTotalCount(items.size());
+        return result;
+    }
+
+    private String mapApprovalStatus(Integer status) {
+        if (status == null) return "未知";
+        return switch (status) {
+            case 0 -> "待审批";
+            case 1 -> "审批中";
+            case 2 -> "已通过";
+            case 3 -> "已驳回";
+            case 4 -> "超时转办";
+            case 5 -> "已撤销";
+            default -> "未知";
+        };
+    }
+
     private FundReport findLatestReportInMonth(List<FundReport> reports, Long branchId, YearMonth ym) {
         LocalDate mStart = ym.atDay(1);
         LocalDate mEnd = ym.atEndOfMonth();
