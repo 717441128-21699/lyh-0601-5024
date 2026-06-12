@@ -41,6 +41,7 @@ public class LoanService {
     private final ApprovalService approvalService;
     private final NotificationService notificationService;
     private final RiskAlertService riskAlertService;
+    private final RiskAlertRuleConfigService ruleConfigService;
     private final BusinessAuditLogService auditLogService;
 
     public LoanPreAuditResultDTO preAuditLoan(LoanApplyDTO dto) {
@@ -97,13 +98,18 @@ public class LoanService {
 
         if (debtDim.getActualScore().compareTo(new BigDecimal("5")) <= 0
                 && debtDim.getActualScore().compareTo(BigDecimal.ZERO) > 0) {
+            List<RiskAlertRuleConfig> rules = ruleConfigService.getEffectiveRules(RiskAlertTypeEnum.DEBT_ABNORMAL.getCode());
+            String ruleCode = (rules != null && !rules.isEmpty()) ? rules.get(0).getRuleCode() : "DEBT_001";
+            String ruleVersion = (rules != null && !rules.isEmpty()) ? rules.get(0).getRuleVersion() : "DEFAULT";
+
             riskAlertService.createAlert(
                     RiskAlertTypeEnum.DEBT_ABNORMAL, "LOAN_PRE_AUDIT",
                     "PRE_AUDIT_" + dto.getEmployeeId(), "loan", null,
                     dto.getEmployeeId(), employee.getName(), employee.getBranchId(),
                     "贷款申请人负债异常",
                     String.format("职工%s负债比率异常，负债评分仅%.0f分（满分20分）", employee.getName(), debtDim.getActualScore()),
-                    debtDim.getActualScore(), new BigDecimal("5"));
+                    debtDim.getActualScore(), rules != null && !rules.isEmpty() ? rules.get(0).getThresholdValue() : new BigDecimal("5"),
+                    ruleCode, ruleVersion);
         }
 
         RiskScoreDimensionDTO houseDim = scoreHouseValuation(dto.getHouseAppraisalValue(), dto.getApplicationAmount(), lc);
@@ -117,13 +123,19 @@ public class LoanService {
         result.setRiskTotalScore(totalScore);
 
         if (totalScore.compareTo(new BigDecimal("60")) < 0 && totalScore.compareTo(BigDecimal.ZERO) > 0) {
+            List<RiskAlertRuleConfig> rules = ruleConfigService.getEffectiveRules(RiskAlertTypeEnum.LOW_RISK_SCORE.getCode());
+            String ruleCode = (rules != null && !rules.isEmpty()) ? rules.get(0).getRuleCode() : "SCORE_001";
+            String ruleVersion = (rules != null && !rules.isEmpty()) ? rules.get(0).getRuleVersion() : "DEFAULT";
+
             riskAlertService.createAlert(
                     RiskAlertTypeEnum.LOW_RISK_SCORE, "LOAN_PRE_AUDIT",
                     "PRE_AUDIT_" + dto.getEmployeeId(), "loan", null,
                     dto.getEmployeeId(), employee.getName(), employee.getBranchId(),
                     "贷款预审评分过低",
-                    String.format("职工%s预审风控评分%.2f分，低于60分警戒线", employee.getName(), totalScore),
-                    totalScore, new BigDecimal("60"));
+                    String.format("职工%s预审风控评分%.2f分，低于%.0f分警戒线", employee.getName(), totalScore,
+                            rules != null && !rules.isEmpty() ? rules.get(0).getThresholdValue() : new BigDecimal("60")),
+                    totalScore, rules != null && !rules.isEmpty() ? rules.get(0).getThresholdValue() : new BigDecimal("60"),
+                    ruleCode, ruleVersion);
         }
 
         BigDecimal balanceBasedMax = balance.multiply(new BigDecimal("15"))

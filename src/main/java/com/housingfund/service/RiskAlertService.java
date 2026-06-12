@@ -7,10 +7,12 @@ import com.housingfund.common.BusinessException;
 import com.housingfund.common.ErrorCode;
 import com.housingfund.dto.RiskAlertHandleDTO;
 import com.housingfund.entity.RiskAlertEvent;
+import com.housingfund.entity.RiskAlertRuleConfig;
 import com.housingfund.enums.NotificationTypeEnum;
 import com.housingfund.enums.RiskAlertStatusEnum;
 import com.housingfund.enums.RiskAlertTypeEnum;
 import com.housingfund.mapper.RiskAlertEventMapper;
+import com.housingfund.mapper.RiskAlertRuleConfigMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -27,13 +29,43 @@ public class RiskAlertService {
 
     private final RiskAlertEventMapper alertEventMapper;
     private final NotificationService notificationService;
+    private final RiskAlertRuleConfigMapper ruleConfigMapper;
+
+    public BigDecimal getEffectiveThreshold(String alertType) {
+        List<RiskAlertRuleConfig> rules = ruleConfigMapper.findEffectiveByAlertType(alertType, LocalDateTime.now());
+        if (rules == null || rules.isEmpty()) {
+            return getDefaultThreshold(alertType);
+        }
+        return rules.get(0).getThresholdValue();
+    }
+
+    private BigDecimal getDefaultThreshold(String alertType) {
+        return switch (alertType) {
+            case "LOW_RISK_SCORE" -> new BigDecimal("60");
+            case "DEBT_ABNORMAL" -> new BigDecimal("5");
+            case "OVERDUE_RISING" -> new BigDecimal("30");
+            case "EARLY_REPAYMENT_ABNORMAL" -> new BigDecimal("0.5");
+            default -> BigDecimal.ZERO;
+        };
+    }
+
+    private String buildRuleSnapshot(RiskAlertRuleConfig config) {
+        if (config == null) return null;
+        return String.format("规则%s|阈值%.2f|比较符%s|等级%s|版本%s",
+                config.getRuleCode() != null ? config.getRuleCode() : "",
+                config.getThresholdValue() != null ? config.getThresholdValue() : BigDecimal.ZERO,
+                config.getComparisonOperator() != null ? config.getComparisonOperator() : "<",
+                config.getAlertLevel() != null ? config.getAlertLevel() : "",
+                config.getRuleVersion() != null ? config.getRuleVersion() : "DEFAULT");
+    }
 
     @Transactional(rollbackFor = Exception.class)
     public RiskAlertEvent createAlert(RiskAlertTypeEnum alertType, String alertSource,
                                       String businessNo, String businessType, Long businessId,
                                       Long employeeId, String employeeName, Long branchId,
                                       String alertTitle, String alertContent,
-                                      BigDecimal alertValue, BigDecimal thresholdValue) {
+                                      BigDecimal alertValue, BigDecimal thresholdValue,
+                                      String ruleCode, String ruleVersion) {
         RiskAlertEvent event = new RiskAlertEvent();
         event.setAlertNo("RA" + IdUtil.getSnowflakeNextIdStr());
         event.setAlertType(alertType.getCode());
@@ -53,6 +85,21 @@ public class RiskAlertService {
         event.setAlertStatus(RiskAlertStatusEnum.PENDING.getCode());
         event.setResolveDeadline(LocalDateTime.now().plusHours(24));
         event.setStatus(1);
+
+        RiskAlertRuleConfig config = null;
+        if (ruleCode != null) {
+            config = ruleConfigMapper.findByRuleCodeAndVersion(ruleCode, ruleVersion);
+        }
+        if (config == null) {
+            List<RiskAlertRuleConfig> configs = ruleConfigMapper.findEffectiveByAlertType(alertType.getCode(), LocalDateTime.now());
+            if (configs != null && !configs.isEmpty()) {
+                config = configs.get(0);
+            }
+        }
+        event.setRuleCode(config != null ? config.getRuleCode() : null);
+        event.setRuleVersion(config != null ? config.getRuleVersion() : null);
+        event.setRuleSnapshot(buildRuleSnapshot(config));
+
         alertEventMapper.insert(event);
 
         sendAlertNotification(event);

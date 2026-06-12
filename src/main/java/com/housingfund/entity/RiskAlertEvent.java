@@ -35,4 +35,7 @@ public class RiskAlertEvent extends BaseEntity {
     private String handleRemark;
     private LocalDateTime resolveDeadline;
     private Integer status;
+    private String ruleCode;
+    private String ruleVersion;
+    private String ruleSnapshot;
 }

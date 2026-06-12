@@ -39,6 +39,7 @@ public class RepaymentService {
     private final EmployeeMapper employeeMapper;
     private final NotificationService notificationService;
     private final RiskAlertService riskAlertService;
+    private final RiskAlertRuleConfigService ruleConfigService;
     private final FundAccountService fundAccountService;
     private final BusinessAuditLogService auditLogService;
 
@@ -405,6 +406,10 @@ public class RepaymentService {
                     sendOverdueAlert(account, totalOverdueDays, totalOverdueAmount, totalPenalty);
 
                     Employee emp = employeeMapper.selectById(account.getEmployeeId());
+                    List<RiskAlertRuleConfig> rules = ruleConfigService.getEffectiveRules(RiskAlertTypeEnum.OVERDUE_RISING.getCode());
+                    String ruleCode = (rules != null && !rules.isEmpty()) ? rules.get(0).getRuleCode() : "OVERDUE_001";
+                    String ruleVersion = (rules != null && !rules.isEmpty()) ? rules.get(0).getRuleVersion() : "DEFAULT";
+
                     riskAlertService.createAlert(
                             RiskAlertTypeEnum.OVERDUE_RISING, "OVERDUE_CHECK",
                             account.getLoanAccountNo(), "repayment", account.getId(),
@@ -412,7 +417,8 @@ public class RepaymentService {
                             "贷款逾期预警",
                             String.format("贷款账户%s逾期%d天，累计欠款%.2f元",
                                     account.getLoanAccountNo(), totalOverdueDays, totalOverdueAmount),
-                            BigDecimal.valueOf(totalOverdueDays), BigDecimal.valueOf(30));
+                            BigDecimal.valueOf(totalOverdueDays), rules != null && !rules.isEmpty() ? rules.get(0).getThresholdValue() : BigDecimal.valueOf(30),
+                            ruleCode, ruleVersion);
 
                     overdueCount++;
                 }
@@ -684,14 +690,20 @@ public class RepaymentService {
 
                 if (earlyRepaymentAmount.compareTo(remainingPrincipal.multiply(new BigDecimal("0.5"))) > 0) {
                     Employee emp = employeeMapper.selectById(account.getEmployeeId());
+                    List<RiskAlertRuleConfig> rules = ruleConfigService.getEffectiveRules(RiskAlertTypeEnum.EARLY_REPAYMENT_ABNORMAL.getCode());
+                    String ruleCode = (rules != null && !rules.isEmpty()) ? rules.get(0).getRuleCode() : "EARLY_001";
+                    String ruleVersion = (rules != null && !rules.isEmpty()) ? rules.get(0).getRuleVersion() : "DEFAULT";
+                    BigDecimal threshold = rules != null && !rules.isEmpty() ? rules.get(0).getThresholdValue() : new BigDecimal("0.5");
+
                     riskAlertService.createAlert(
                             RiskAlertTypeEnum.EARLY_REPAYMENT_ABNORMAL, "EARLY_REPAYMENT",
                             account.getLoanAccountNo(), "repayment", account.getId(),
                             account.getEmployeeId(), emp != null ? emp.getName() : "", account.getBranchId(),
                             "部分提前还款金额异常",
-                            String.format("贷款账户%s部分提前还款%.2f元，超过剩余本金50%%(%.2f元)",
-                                    account.getLoanAccountNo(), earlyRepaymentAmount, remainingPrincipal.multiply(new BigDecimal("0.5"))),
-                            earlyRepaymentAmount, remainingPrincipal.multiply(new BigDecimal("0.5")));
+                            String.format("贷款账户%s部分提前还款%.2f元，超过剩余本金%.0f%%(%.2f元)",
+                                    account.getLoanAccountNo(), earlyRepaymentAmount, threshold.multiply(new BigDecimal("100")), remainingPrincipal.multiply(threshold)),
+                            earlyRepaymentAmount, remainingPrincipal.multiply(threshold),
+                            ruleCode, ruleVersion);
                 }
 
                 Employee employee = employeeMapper.selectById(account.getEmployeeId());

@@ -759,6 +759,9 @@ CREATE TABLE risk_alert_event (
     handle_remark VARCHAR(500) COMMENT '处理备注',
     resolve_deadline DATETIME COMMENT '要求处理截止时间',
     status TINYINT DEFAULT 1 COMMENT '状态 1有效 0无效',
+    rule_code VARCHAR(50) COMMENT '命中规则编码',
+    rule_version VARCHAR(50) COMMENT '命中规则版本',
+    rule_snapshot VARCHAR(500) COMMENT '规则快照',
     create_time DATETIME COMMENT '创建时间',
     update_time DATETIME COMMENT '更新时间',
     create_by VARCHAR(50) COMMENT '创建人',
@@ -771,8 +774,51 @@ CREATE TABLE risk_alert_event (
     INDEX idx_employee_id (employee_id),
     INDEX idx_branch_id (branch_id),
     INDEX idx_alert_level (alert_level),
-    INDEX idx_resolve_deadline (resolve_deadline)
+    INDEX idx_resolve_deadline (resolve_deadline),
+    INDEX idx_rule_code (rule_code)
 ) ENGINE=InnoDB COMMENT='风险预警事件表';
+
+-- ============================================================
+-- 十二、风险预警规则配置表
+-- ============================================================
+
+DROP TABLE IF EXISTS risk_alert_rule_config;
+CREATE TABLE risk_alert_rule_config (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
+    alert_type VARCHAR(30) NOT NULL COMMENT '预警类型编码',
+    alert_type_name VARCHAR(50) COMMENT '预警类型名称',
+    rule_code VARCHAR(50) NOT NULL COMMENT '规则编码',
+    rule_name VARCHAR(100) COMMENT '规则名称',
+    threshold_value DECIMAL(16,2) COMMENT '阈值',
+    secondary_threshold DECIMAL(16,2) COMMENT '二级阈值',
+    comparison_operator VARCHAR(10) COMMENT '比较符: <, <=, >, >=, =',
+    alert_level VARCHAR(20) COMMENT '预警等级: HIGH/MEDIUM/LOW',
+    rule_description VARCHAR(500) COMMENT '规则描述',
+    effective_time DATETIME COMMENT '生效时间',
+    expiry_time DATETIME COMMENT '失效时间',
+    rule_version VARCHAR(50) COMMENT '规则版本',
+    sort_order INT DEFAULT 0 COMMENT '排序',
+    status TINYINT DEFAULT 1 COMMENT '状态 1启用 0停用',
+    create_time DATETIME COMMENT '创建时间',
+    update_time DATETIME COMMENT '更新时间',
+    create_by VARCHAR(50) COMMENT '创建人',
+    update_by VARCHAR(50) COMMENT '更新人',
+    deleted TINYINT DEFAULT 0 COMMENT '逻辑删除',
+    INDEX idx_alert_type (alert_type),
+    INDEX idx_rule_code (rule_code),
+    INDEX idx_rule_version (rule_code, rule_version),
+    INDEX idx_effective_time (effective_time, expiry_time)
+) ENGINE=InnoDB COMMENT='风险预警规则配置表';
+
+-- ============================================================
+-- 十三、风险预警规则初始化数据
+-- ============================================================
+
+INSERT INTO risk_alert_rule_config (alert_type, alert_type_name, rule_code, rule_name, threshold_value, secondary_threshold, comparison_operator, alert_level, rule_description, effective_time, expiry_time, rule_version, sort_order, status) VALUES
+('LOW_RISK_SCORE', '贷款预审评分过低', 'SCORE_001', '预审风控评分低于60分', 60.00, NULL, '<', 'MEDIUM', '贷款预审风控综合评分低于60分时触发预警', NULL, NULL, 'DEFAULT', 1, 1),
+('DEBT_ABNORMAL', '贷款申请人负债异常', 'DEBT_001', '负债维度评分低于5分', 5.00, NULL, '<=', 'MEDIUM', '贷款预审时负债维度评分低于等于5分时触发预警', NULL, NULL, 'DEFAULT', 1, 1),
+('OVERDUE_RISING', '贷款逾期预警', 'OVERDUE_001', '逾期天数超过30天', 30.00, 60.00, '>', 'HIGH', '贷款账户逾期天数超过30天时触发预警，超过60天升级为最高等级', NULL, NULL, 'DEFAULT', 1, 1),
+('EARLY_REPAYMENT_ABNORMAL', '部分提前还款金额异常', 'EARLY_001', '提前还款超过剩余本金50%', 0.50, NULL, '>', 'LOW', '部分提前还款金额超过剩余本金50%时触发预警', NULL, NULL, 'DEFAULT', 1, 1);
 
 -- ============================================================
 -- 十三、业务审计流水表
