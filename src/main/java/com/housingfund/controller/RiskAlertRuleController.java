@@ -60,4 +60,55 @@ public class RiskAlertRuleController {
             @Parameter(description = "预警类型") @RequestParam String alertType) {
         return Result.success(ruleConfigService.getEffectiveThreshold(alertType));
     }
+
+    @Operation(summary = "分页查询规则列表（按发布状态）", description = "支持按预警类型、发布状态筛选")
+    @GetMapping("/list-by-status")
+    public Result<Page<RiskAlertRuleConfig>> queryRulesByStatus(
+            @Parameter(description = "预警类型") @RequestParam(required = false) String alertType,
+            @Parameter(description = "发布状态: DRAFT/PENDING_RELEASE/PUBLISHED/REVOKED") @RequestParam(required = false) String publishStatus,
+            @Parameter(description = "页码") @RequestParam(defaultValue = "1") Integer pageNum,
+            @Parameter(description = "每页条数") @RequestParam(defaultValue = "20") Integer pageSize) {
+        return Result.success(ruleConfigService.queryRules(alertType, publishStatus, pageNum, pageSize));
+    }
+
+    @Operation(summary = "查询规则详情")
+    @GetMapping("/detail/{id}")
+    public Result<RiskAlertRuleConfig> getRuleDetail(@PathVariable Long id) {
+        return Result.success(ruleConfigService.getRuleById(id));
+    }
+
+    @Operation(summary = "创建规则草稿", description = "新建规则，先进入草稿状态，可继续编辑调整阈值")
+    @PostMapping("/draft")
+    public Result<RiskAlertRuleConfig> createDraft(@RequestBody RiskAlertRuleConfig rule) {
+        RiskAlertRuleConfig r = ruleConfigService.createDraft(rule);
+        return Result.success("规则草稿已创建", r);
+    }
+
+    @Operation(summary = "提交待发布", description = "草稿确认无误后提交为待发布状态，等待发布审批")
+    @PostMapping("/submit-release/{ruleId}")
+    public Result<RiskAlertRuleConfig> submitForRelease(
+            @PathVariable Long ruleId,
+            @Parameter(description = "版本变更说明") @RequestParam(required = false) String changeLog,
+            @Parameter(description = "提交人ID") @RequestParam(required = false) Long publisherId,
+            @Parameter(description = "提交人姓名") @RequestParam(required = false) String publisherName) {
+        RiskAlertRuleConfig r = ruleConfigService.submitForRelease(ruleId, changeLog, publisherId, publisherName);
+        return Result.success("已提交待发布", r);
+    }
+
+    @Operation(summary = "发布规则", description = "待发布规则正式发布，同时停用同类型旧版本，新业务按新规则阈值生效")
+    @PostMapping("/publish/{ruleId}")
+    public Result<RiskAlertRuleConfig> publishRule(
+            @PathVariable Long ruleId,
+            @Parameter(description = "发布人ID") @RequestParam(required = false) Long publisherId,
+            @Parameter(description = "发布人姓名") @RequestParam(required = false) String publisherName) {
+        RiskAlertRuleConfig r = ruleConfigService.publishRule(ruleId, publisherId, publisherName);
+        return Result.success("规则已发布，新业务将按此规则执行", r);
+    }
+
+    @Operation(summary = "停用规则", description = "停用已发布的规则")
+    @PostMapping("/revoke/{ruleId}")
+    public Result<RiskAlertRuleConfig> revokeRule(@PathVariable Long ruleId) {
+        RiskAlertRuleConfig r = ruleConfigService.revokeRule(ruleId);
+        return Result.success("规则已停用", r);
+    }
 }

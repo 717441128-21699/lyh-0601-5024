@@ -797,6 +797,12 @@ CREATE TABLE risk_alert_rule_config (
     effective_time DATETIME COMMENT '生效时间',
     expiry_time DATETIME COMMENT '失效时间',
     rule_version VARCHAR(50) COMMENT '规则版本',
+    publish_status VARCHAR(30) DEFAULT 'DRAFT' COMMENT '发布状态: DRAFT草稿 PENDING_RELEASE待发布 PUBLISHED已发布 REVOKED已停用',
+    publisher_id BIGINT COMMENT '发布人ID',
+    publisher_name VARCHAR(50) COMMENT '发布人姓名',
+    publish_time DATETIME COMMENT '发布时间',
+    draft_time DATETIME COMMENT '草稿创建时间',
+    change_log VARCHAR(500) COMMENT '版本变更说明',
     sort_order INT DEFAULT 0 COMMENT '排序',
     status TINYINT DEFAULT 1 COMMENT '状态 1启用 0停用',
     create_time DATETIME COMMENT '创建时间',
@@ -814,11 +820,11 @@ CREATE TABLE risk_alert_rule_config (
 -- 十三、风险预警规则初始化数据
 -- ============================================================
 
-INSERT INTO risk_alert_rule_config (alert_type, alert_type_name, rule_code, rule_name, threshold_value, secondary_threshold, comparison_operator, alert_level, rule_description, effective_time, expiry_time, rule_version, sort_order, status) VALUES
-('LOW_RISK_SCORE', '贷款预审评分过低', 'SCORE_001', '预审风控评分低于60分', 60.00, NULL, '<', 'MEDIUM', '贷款预审风控综合评分低于60分时触发预警', NULL, NULL, 'DEFAULT', 1, 1),
-('DEBT_ABNORMAL', '贷款申请人负债异常', 'DEBT_001', '负债维度评分低于5分', 5.00, NULL, '<=', 'MEDIUM', '贷款预审时负债维度评分低于等于5分时触发预警', NULL, NULL, 'DEFAULT', 1, 1),
-('OVERDUE_RISING', '贷款逾期预警', 'OVERDUE_001', '逾期天数超过30天', 30.00, 60.00, '>', 'HIGH', '贷款账户逾期天数超过30天时触发预警，超过60天升级为最高等级', NULL, NULL, 'DEFAULT', 1, 1),
-('EARLY_REPAYMENT_ABNORMAL', '部分提前还款金额异常', 'EARLY_001', '提前还款超过剩余本金50%', 0.50, NULL, '>', 'LOW', '部分提前还款金额超过剩余本金50%时触发预警', NULL, NULL, 'DEFAULT', 1, 1);
+INSERT INTO risk_alert_rule_config (alert_type, alert_type_name, rule_code, rule_name, threshold_value, secondary_threshold, comparison_operator, alert_level, rule_description, effective_time, expiry_time, rule_version, publish_status, publisher_name, publish_time, sort_order, status) VALUES
+('LOW_RISK_SCORE', '贷款预审评分过低', 'SCORE_001', '预审风控评分低于60分', 60.00, NULL, '<', 'MEDIUM', '贷款预审风控综合评分低于60分时触发预警', NULL, NULL, 'v1.0', 'PUBLISHED', '系统管理员', NOW(), 1, 1),
+('DEBT_ABNORMAL', '贷款申请人负债异常', 'DEBT_001', '负债维度评分低于5分', 5.00, NULL, '<=', 'MEDIUM', '贷款预审时负债维度评分低于等于5分时触发预警', NULL, NULL, 'v1.0', 'PUBLISHED', '系统管理员', NOW(), 1, 1),
+('OVERDUE_RISING', '贷款逾期预警', 'OVERDUE_001', '逾期天数超过30天', 30.00, 60.00, '>', 'HIGH', '贷款账户逾期天数超过30天时触发预警，超过60天升级为最高等级', NULL, NULL, 'v1.0', 'PUBLISHED', '系统管理员', NOW(), 1, 1),
+('EARLY_REPAYMENT_ABNORMAL', '部分提前还款金额异常', 'EARLY_001', '提前还款超过剩余本金50%', 0.50, NULL, '>', 'LOW', '部分提前还款金额超过剩余本金50%时触发预警', NULL, NULL, 'v1.0', 'PUBLISHED', '系统管理员', NOW(), 1, 1);
 
 -- ============================================================
 -- 十三、业务审计流水表
@@ -859,3 +865,154 @@ CREATE TABLE business_audit_log (
     INDEX idx_action_time (action_time),
     INDEX idx_branch_id (branch_id)
 ) ENGINE=InnoDB COMMENT='业务审计流水表';
+
+-- ============================================================
+-- 十四、资金对账表
+-- ============================================================
+
+DROP TABLE IF EXISTS fund_reconciliation;
+CREATE TABLE fund_reconciliation (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
+    recon_no VARCHAR(32) NOT NULL UNIQUE COMMENT '对账编号',
+    recon_month VARCHAR(7) NOT NULL COMMENT '对账月份(yyyy-MM)',
+    branch_id BIGINT COMMENT '分支机构ID',
+    branch_name VARCHAR(100) COMMENT '分支机构名称',
+    recon_type VARCHAR(20) NOT NULL COMMENT '对账类型: contribution缴存 withdrawal提取 loan贷款发放 repayment还款',
+    recon_type_name VARCHAR(50) COMMENT '对账类型名称',
+    summary_amount DECIMAL(18,2) DEFAULT 0 COMMENT '汇总金额(来自报表)',
+    detail_amount DECIMAL(18,2) DEFAULT 0 COMMENT '明细金额(来自业务明细表)',
+    diff_amount DECIMAL(18,2) DEFAULT 0 COMMENT '差异金额(绝对值)',
+    diff_direction VARCHAR(20) COMMENT '差异方向: SUMMARY_GREATER汇总数大 DETAIL_GREATER明细数大',
+    diff_count INT DEFAULT 0 COMMENT '差异笔数',
+    auto_cause VARCHAR(500) COMMENT '自动归因分析结果',
+    manual_cause VARCHAR(500) COMMENT '人工归因说明',
+    handle_status VARCHAR(30) DEFAULT 'PENDING_REVIEW' COMMENT '处理状态: AUTO_CONFIRMED自动确认 PENDING_REVIEW待人工 CONFIRMED已确认 NEED_ADJUST需调整 ESCALATED转人工复核',
+    handler_id BIGINT COMMENT '处理人ID',
+    handler_name VARCHAR(50) COMMENT '处理人姓名',
+    handle_time DATETIME COMMENT '处理时间',
+    handle_remark VARCHAR(500) COMMENT '处理备注',
+    diff_detail TEXT COMMENT '差异明细描述',
+    status TINYINT DEFAULT 1 COMMENT '状态 1有效 0无效',
+    create_time DATETIME COMMENT '创建时间',
+    update_time DATETIME COMMENT '更新时间',
+    create_by VARCHAR(50) COMMENT '创建人',
+    update_by VARCHAR(50) COMMENT '更新人',
+    deleted TINYINT DEFAULT 0 COMMENT '逻辑删除',
+    INDEX idx_recon_month (recon_month),
+    INDEX idx_branch_id (branch_id),
+    INDEX idx_recon_type (recon_type),
+    INDEX idx_handle_status (handle_status)
+) ENGINE=InnoDB COMMENT='资金对账主表';
+
+DROP TABLE IF EXISTS fund_reconciliation_diff;
+CREATE TABLE fund_reconciliation_diff (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
+    recon_id BIGINT NOT NULL COMMENT '对账主表ID',
+    recon_no VARCHAR(32) COMMENT '对账编号',
+    recon_month VARCHAR(7) COMMENT '对账月份',
+    branch_id BIGINT COMMENT '分支机构ID',
+    diff_type VARCHAR(20) COMMENT '差异类型: GLOBAL全局差异 SINGLE单笔差异',
+    business_no VARCHAR(32) COMMENT '业务单号',
+    business_type VARCHAR(30) COMMENT '业务类型',
+    business_id BIGINT COMMENT '业务ID',
+    summary_amount DECIMAL(18,2) DEFAULT 0 COMMENT '汇总金额',
+    detail_amount DECIMAL(18,2) DEFAULT 0 COMMENT '明细金额',
+    diff_amount DECIMAL(18,2) DEFAULT 0 COMMENT '差异金额',
+    diff_reason VARCHAR(500) COMMENT '差异原因',
+    handle_status VARCHAR(30) COMMENT '处理状态',
+    handle_remark VARCHAR(500) COMMENT '处理备注',
+    business_date DATE COMMENT '业务日期',
+    status TINYINT DEFAULT 1 COMMENT '状态 1有效 0无效',
+    create_time DATETIME COMMENT '创建时间',
+    update_time DATETIME COMMENT '更新时间',
+    create_by VARCHAR(50) COMMENT '创建人',
+    update_by VARCHAR(50) COMMENT '更新人',
+    deleted TINYINT DEFAULT 0 COMMENT '逻辑删除',
+    INDEX idx_recon_id (recon_id),
+    INDEX idx_recon_month (recon_month),
+    INDEX idx_branch_id (branch_id),
+    INDEX idx_business (business_type, business_id)
+) ENGINE=InnoDB COMMENT='资金对账差异明细表';
+
+-- ============================================================
+-- 十五、稽核案件表
+-- ============================================================
+
+DROP TABLE IF EXISTS inspection_case;
+CREATE TABLE inspection_case (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
+    case_no VARCHAR(32) NOT NULL UNIQUE COMMENT '案件编号',
+    case_title VARCHAR(200) COMMENT '案件标题',
+    case_type VARCHAR(30) COMMENT '案件类型: RISK_ALERT风险预警聚合 LARGE_AMOUNT大额操作',
+    case_level VARCHAR(10) COMMENT '案件等级: HIGH高 MEDIUM中 LOW低',
+    case_status VARCHAR(30) DEFAULT 'PENDING' COMMENT '案件状态: PENDING待分配 PROCESSING处理中 CLOSED已结案',
+    branch_id BIGINT COMMENT '所属分支机构ID',
+    branch_name VARCHAR(100) COMMENT '所属分支机构名称',
+    employee_id BIGINT COMMENT '关联职工ID',
+    employee_name VARCHAR(50) COMMENT '关联职工姓名',
+    company_id BIGINT COMMENT '关联单位ID',
+    company_name VARCHAR(200) COMMENT '关联单位名称',
+    related_business_nos TEXT COMMENT '关联业务单号列表',
+    related_business_types VARCHAR(200) COMMENT '关联业务类型列表',
+    related_alert_nos TEXT COMMENT '关联预警编号列表',
+    related_diff_ids TEXT COMMENT '关联资金差异ID列表',
+    evidence_count INT DEFAULT 0 COMMENT '关联证据数量',
+    max_amount_involved DECIMAL(18,2) COMMENT '单笔最大涉事金额',
+    case_summary VARCHAR(1000) COMMENT '案件摘要',
+    processing_progress VARCHAR(500) COMMENT '处理进度说明',
+    assignee_id BIGINT COMMENT '分配核查人员ID',
+    assignee_name VARCHAR(50) COMMENT '分配核查人员姓名',
+    assign_time DATETIME COMMENT '分配时间',
+    resolve_deadline DATETIME COMMENT '办理时限',
+    final_conclusion VARCHAR(1000) COMMENT '最终结论',
+    final_result VARCHAR(30) COMMENT '最终结果: CONFIRMED属实 FALSE_POSITIVE误报 ESCALATED升级',
+    close_time DATETIME COMMENT '结案时间',
+    remark VARCHAR(1000) COMMENT '备注',
+    status TINYINT DEFAULT 1 COMMENT '状态 1有效 0无效',
+    create_time DATETIME COMMENT '创建时间',
+    update_time DATETIME COMMENT '更新时间',
+    create_by VARCHAR(50) COMMENT '创建人',
+    update_by VARCHAR(50) COMMENT '更新人',
+    deleted TINYINT DEFAULT 0 COMMENT '逻辑删除',
+    INDEX idx_case_no (case_no),
+    INDEX idx_case_status (case_status),
+    INDEX idx_branch_id (branch_id),
+    INDEX idx_employee_id (employee_id),
+    INDEX idx_case_type (case_type),
+    INDEX idx_assignee_id (assignee_id)
+) ENGINE=InnoDB COMMENT='稽核案件主表';
+
+-- ============================================================
+-- 十六、稽核案件关联证据表
+-- ============================================================
+
+DROP TABLE IF EXISTS inspection_evidence;
+CREATE TABLE inspection_evidence (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
+    case_id BIGINT NOT NULL COMMENT '所属案件ID',
+    case_no VARCHAR(32) COMMENT '所属案件编号',
+    evidence_type VARCHAR(30) COMMENT '证据类型: RISK_ALERT风险预警 AUDIT_LOG审计流水 FUND_DIFF资金差异',
+    evidence_type_name VARCHAR(50) COMMENT '证据类型名称',
+    evidence_source VARCHAR(50) COMMENT '证据来源模块',
+    business_no VARCHAR(32) COMMENT '关联业务单号',
+    business_type VARCHAR(30) COMMENT '关联业务类型',
+    business_id BIGINT COMMENT '关联业务ID',
+    alert_no VARCHAR(32) COMMENT '关联预警单号',
+    diff_id VARCHAR(50) COMMENT '关联资金差异ID',
+    evidence_title VARCHAR(200) COMMENT '证据标题',
+    evidence_content TEXT COMMENT '证据内容',
+    amount_involved DECIMAL(18,2) COMMENT '涉事金额',
+    event_time DATETIME COMMENT '事件时间',
+    operator_name VARCHAR(50) COMMENT '操作人员姓名',
+    sort_order INT DEFAULT 0 COMMENT '排序',
+    status TINYINT DEFAULT 1 COMMENT '状态 1有效 0无效',
+    create_time DATETIME COMMENT '创建时间',
+    update_time DATETIME COMMENT '更新时间',
+    create_by VARCHAR(50) COMMENT '创建人',
+    update_by VARCHAR(50) COMMENT '更新人',
+    deleted TINYINT DEFAULT 0 COMMENT '逻辑删除',
+    INDEX idx_case_id (case_id),
+    INDEX idx_case_no (case_no),
+    INDEX idx_business (business_type, business_id),
+    INDEX idx_alert_no (alert_no)
+) ENGINE=InnoDB COMMENT='稽核案件关联证据表';

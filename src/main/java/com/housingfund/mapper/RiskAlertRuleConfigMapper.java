@@ -23,4 +23,10 @@ public interface RiskAlertRuleConfigMapper extends BaseMapper<RiskAlertRuleConfi
 
     @Select("SELECT * FROM risk_alert_rule_config WHERE rule_code = #{ruleCode} AND rule_version = #{ruleVersion} AND deleted = 0")
     RiskAlertRuleConfig findByRuleCodeAndVersion(@Param("ruleCode") String ruleCode, @Param("ruleVersion") String ruleVersion);
+
+    @Select("SELECT * FROM risk_alert_rule_config WHERE publish_status = 'PUBLISHED' AND status = 1 AND deleted = 0 " +
+            "AND (effective_time IS NULL OR effective_time <= #{now}) " +
+            "AND (expiry_time IS NULL OR expiry_time > #{now}) " +
+            "ORDER BY create_time DESC")
+    List<RiskAlertRuleConfig> findActivePublishedRules(@Param("now") LocalDateTime now);
 }

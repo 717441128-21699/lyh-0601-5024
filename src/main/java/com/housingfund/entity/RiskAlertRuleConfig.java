@@ -26,4 +26,10 @@ public class RiskAlertRuleConfig extends BaseEntity {
     private String ruleVersion;
     private Integer sortOrder;
     private Integer status;
+    private String publishStatus;
+    private Long publisherId;
+    private String publisherName;
+    private LocalDateTime publishTime;
+    private LocalDateTime draftTime;
+    private String changeLog;
 }

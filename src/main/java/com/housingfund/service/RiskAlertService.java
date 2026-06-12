@@ -30,6 +30,7 @@ public class RiskAlertService {
     private final RiskAlertEventMapper alertEventMapper;
     private final NotificationService notificationService;
     private final RiskAlertRuleConfigMapper ruleConfigMapper;
+    private final RiskAlertRuleConfigService riskAlertRuleConfigService;
 
     public BigDecimal getEffectiveThreshold(String alertType) {
         List<RiskAlertRuleConfig> rules = ruleConfigMapper.findEffectiveByAlertType(alertType, LocalDateTime.now());
@@ -86,19 +87,44 @@ public class RiskAlertService {
         event.setResolveDeadline(LocalDateTime.now().plusHours(24));
         event.setStatus(1);
 
-        RiskAlertRuleConfig config = null;
-        if (ruleCode != null) {
-            config = ruleConfigMapper.findByRuleCodeAndVersion(ruleCode, ruleVersion);
-        }
-        if (config == null) {
-            List<RiskAlertRuleConfig> configs = ruleConfigMapper.findEffectiveByAlertType(alertType.getCode(), LocalDateTime.now());
-            if (configs != null && !configs.isEmpty()) {
-                config = configs.get(0);
+        List<RiskAlertRuleConfig> activeRules = riskAlertRuleConfigService.getActivePublishedRules(LocalDateTime.now());
+        RiskAlertRuleConfig matchedRule = null;
+        for (RiskAlertRuleConfig r : activeRules) {
+            if (alertType.getCode().equals(r.getAlertType())) {
+                matchedRule = r;
+                break;
             }
         }
-        event.setRuleCode(config != null ? config.getRuleCode() : null);
-        event.setRuleVersion(config != null ? config.getRuleVersion() : null);
-        event.setRuleSnapshot(buildRuleSnapshot(config));
+        if (matchedRule != null) {
+            event.setRuleVersion(matchedRule.getRuleVersion());
+            event.setRuleSnapshot(riskAlertRuleConfigService.buildRuleSnapshot(matchedRule));
+            event.setRulePublishInfo(String.format("发布人:%s,发布时间:%s,变更说明:%s",
+                    matchedRule.getPublisherName() != null ? matchedRule.getPublisherName() : "系统",
+                    matchedRule.getPublishTime() != null ? matchedRule.getPublishTime().toString() : "-",
+                    matchedRule.getChangeLog() != null ? matchedRule.getChangeLog() : "-"));
+            event.setRuleDescription(riskAlertRuleConfigService.buildRuleDescription(matchedRule));
+            if (matchedRule.getAlertLevel() != null) {
+                event.setAlertLevel(matchedRule.getAlertLevel());
+            }
+            if (matchedRule.getThresholdValue() != null) {
+                event.setThresholdValue(matchedRule.getThresholdValue());
+            }
+            event.setRuleCode(matchedRule.getRuleCode());
+        } else {
+            RiskAlertRuleConfig config = null;
+            if (ruleCode != null) {
+                config = ruleConfigMapper.findByRuleCodeAndVersion(ruleCode, ruleVersion);
+            }
+            if (config == null) {
+                List<RiskAlertRuleConfig> configs = ruleConfigMapper.findEffectiveByAlertType(alertType.getCode(), LocalDateTime.now());
+                if (configs != null && !configs.isEmpty()) {
+                    config = configs.get(0);
+                }
+            }
+            event.setRuleCode(config != null ? config.getRuleCode() : null);
+            event.setRuleVersion(config != null ? config.getRuleVersion() : null);
+            event.setRuleSnapshot(buildRuleSnapshot(config));
+        }
 
         alertEventMapper.insert(event);
 

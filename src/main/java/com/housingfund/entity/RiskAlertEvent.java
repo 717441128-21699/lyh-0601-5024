@@ -38,4 +38,6 @@ public class RiskAlertEvent extends BaseEntity {
     private String ruleCode;
     private String ruleVersion;
     private String ruleSnapshot;
+    private String rulePublishInfo;
+    private String ruleDescription;
 }

@@ -30,4 +30,7 @@ public interface ApprovalRecordMapper extends BaseMapper<ApprovalRecord> {
     @Update("UPDATE approval_record SET timeout_escalated = 1, escalated_to_id = #{escalatedToId}, " +
             "approval_comment = CONCAT(IFNULL(approval_comment, ''), '; 超时自动转办') WHERE id = #{id}")
     int markTimeoutEscalated(@Param("id") Long id, @Param("escalatedToId") Long escalatedToId);
+
+    @Select("SELECT * FROM approval_record WHERE business_no = #{businessNo} AND deleted = 0 ORDER BY approval_level ASC")
+    List<ApprovalRecord> findByBusinessNo(@Param("businessNo") String businessNo);
 }
