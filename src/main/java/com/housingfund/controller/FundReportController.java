@@ -2,6 +2,7 @@ package com.housingfund.controller;
 
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.housingfund.common.Result;
+import com.housingfund.dto.DashboardDTO;
 import com.housingfund.dto.FundReportQueryDTO;
 import com.housingfund.entity.FundReport;
 import com.housingfund.service.FundReportService;
@@ -74,5 +75,13 @@ public class FundReportController {
             return Result.error("暂无报表数据，请先生成日报");
         }
         return Result.success(report);
+    }
+
+    @Operation(summary = "运营驾驶舱", description = "按分支机构对比+同比环比+趋势图数据")
+    @GetMapping("/dashboard")
+    public Result<DashboardDTO> getDashboard(
+            @Parameter(description = "分支机构ID") @RequestParam(required = false) Long branchId,
+            @Parameter(description = "查询月数") @RequestParam(required = false, defaultValue = "12") Integer months) {
+        return Result.success(fundReportService.getDashboard(branchId, months));
     }
 }

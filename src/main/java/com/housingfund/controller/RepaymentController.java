@@ -2,6 +2,8 @@ package com.housingfund.controller;
 
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.housingfund.common.Result;
+import com.housingfund.dto.EarlyRepaymentDTO;
+import com.housingfund.dto.EarlyRepaymentResultDTO;
 import com.housingfund.dto.RepaymentDTO;
 import com.housingfund.dto.RepaymentPlanResultDTO;
 import com.housingfund.entity.CollectionTask;
@@ -90,5 +92,17 @@ public class RepaymentController {
         Page<CollectionTask> page = repaymentService.queryCollectionTasks(
                 assigneeId, taskStatus, taskLevel, pageNum, pageSize);
         return Result.success(page);
+    }
+
+    @Operation(summary = "提前还款", description = "全额提前还款或部分提前还款，自动重新计算剩余期数/月供/利息")
+    @PostMapping("/early-repayment")
+    public Result<EarlyRepaymentResultDTO> processEarlyRepayment(@RequestBody EarlyRepaymentDTO dto) {
+        return Result.success(repaymentService.processEarlyRepayment(dto));
+    }
+
+    @Operation(summary = "提前还款预览", description = "预览提前还款后的新还款计划，不实际执行")
+    @PostMapping("/early-repayment/preview")
+    public Result<EarlyRepaymentResultDTO> previewEarlyRepayment(@RequestBody EarlyRepaymentDTO dto) {
+        return Result.success(repaymentService.previewEarlyRepayment(dto));
     }
 }

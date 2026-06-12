@@ -149,7 +149,8 @@ public class WithdrawalService {
         applicationMapper.insert(application);
 
         approvalService.initApprovalProcess(application.getId(), ApplicationTypeEnum.WITHDRAWAL.getCode(),
-                applicationNo, employee.getId(), employee.getName(), employee.getBranchId());
+                applicationNo, employee.getId(), employee.getName(), employee.getBranchId(),
+                dto.getApplicationAmount());
 
         sendApplicationNotification(employee, application, "提取申请已提交，等待审批");
 

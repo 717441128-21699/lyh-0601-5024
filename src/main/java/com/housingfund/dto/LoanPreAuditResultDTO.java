@@ -24,4 +24,14 @@ public class LoanPreAuditResultDTO {
     private Integer loanTerm;
     private String preAuditReport;
     private List<String> reasons = new ArrayList<>();
+
+    private BigDecimal riskTotalScore;
+    private List<RiskScoreDimensionDTO> riskScoreDetails = new ArrayList<>();
+    private BigDecimal balanceBasedMax;
+    private BigDecimal ltvBasedMax;
+    private BigDecimal statutoryMax;
+    private BigDecimal creditMultiplier;
+    private BigDecimal ageAdjustment;
+    private BigDecimal baseRate;
+    private String rateTrace;
 }

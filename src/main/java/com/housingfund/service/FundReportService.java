@@ -5,6 +5,7 @@ import cn.hutool.poi.excel.ExcelUtil;
 import cn.hutool.poi.excel.ExcelWriter;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.housingfund.dto.DashboardDTO;
 import com.housingfund.dto.FundReportQueryDTO;
 import com.housingfund.entity.*;
 import com.housingfund.enums.ApprovalStatusEnum;
@@ -22,6 +23,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.YearMonth;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -274,5 +276,191 @@ public class FundReportService {
         Page<FundReport> page = new Page<>(1, 1);
         Page<FundReport> result = reportMapper.selectPage(page, wrapper);
         return result.getRecords().isEmpty() ? null : result.getRecords().get(0);
+    }
+
+    public DashboardDTO getDashboard(Long branchId, Integer months) {
+        if (months == null || months <= 0) months = 12;
+        DashboardDTO dto = new DashboardDTO();
+
+        LambdaQueryWrapper<FundReport> latestWrapper = new LambdaQueryWrapper<>();
+        latestWrapper.orderByDesc(FundReport::getReportDate);
+        Page<FundReport> lp = new Page<>(1, 1);
+        List<FundReport> lr = reportMapper.selectPage(lp, latestWrapper).getRecords();
+        if (lr.isEmpty()) return dto;
+        LocalDate latestDate = lr.get(0).getReportDate();
+
+        YearMonth latestYm = YearMonth.from(latestDate);
+        YearMonth startYm = latestYm.minusMonths(months - 1);
+
+        YearMonth yoyStartYm = startYm.minusYears(1);
+        LambdaQueryWrapper<FundReport> rangeWrapper = new LambdaQueryWrapper<>();
+        rangeWrapper.ge(FundReport::getReportDate, yoyStartYm.atDay(1))
+                .le(FundReport::getReportDate, latestYm.atEndOfMonth());
+        List<FundReport> allReports = reportMapper.selectList(rangeWrapper);
+
+        YearMonth prevYm = latestYm.minusMonths(1);
+        YearMonth lastYearYm = latestYm.minusYears(1);
+
+        // --- Branch Comparison ---
+        Map<Long, FundReport> latestByBranch = new HashMap<>();
+        for (FundReport r : allReports) {
+            if (!"BRANCH".equals(r.getReportType())) continue;
+            if (!YearMonth.from(r.getReportDate()).equals(latestYm)) continue;
+            FundReport existing = latestByBranch.get(r.getBranchId());
+            if (existing == null || r.getReportDate().isAfter(existing.getReportDate())) {
+                latestByBranch.put(r.getBranchId(), r);
+            }
+        }
+
+        List<DashboardDTO.BranchComparison> branchComparisons = new ArrayList<>();
+        for (FundReport current : latestByBranch.values()) {
+            DashboardDTO.BranchComparison bc = new DashboardDTO.BranchComparison();
+            bc.setBranchId(current.getBranchId());
+            bc.setBranchName(current.getBranchName());
+            bc.setMonthlyContribution(current.getMonthlyContribution());
+            bc.setMonthlyWithdrawal(current.getMonthlyWithdrawal());
+            bc.setMonthlyLoanIssue(current.getMonthlyLoanIssue());
+            bc.setOverdueRate(current.getOverdueRate());
+            bc.setFundBalance(current.getFundBalance());
+
+            FundReport prevReport = findLatestReportInMonth(allReports, current.getBranchId(), prevYm);
+            FundReport lastYearReport = findLatestReportInMonth(allReports, current.getBranchId(), lastYearYm);
+
+            bc.setContributionYoY(calcYoY(current.getMonthlyContribution(), lastYearReport != null ? lastYearReport.getMonthlyContribution() : null));
+            bc.setContributionMoM(calcMoM(current.getMonthlyContribution(), prevReport != null ? prevReport.getMonthlyContribution() : null));
+            bc.setWithdrawalYoY(calcYoY(current.getMonthlyWithdrawal(), lastYearReport != null ? lastYearReport.getMonthlyWithdrawal() : null));
+            bc.setWithdrawalMoM(calcMoM(current.getMonthlyWithdrawal(), prevReport != null ? prevReport.getMonthlyWithdrawal() : null));
+            bc.setLoanYoY(calcYoY(current.getMonthlyLoanIssue(), lastYearReport != null ? lastYearReport.getMonthlyLoanIssue() : null));
+            bc.setLoanMoM(calcMoM(current.getMonthlyLoanIssue(), prevReport != null ? prevReport.getMonthlyLoanIssue() : null));
+            bc.setOverdueRateYoY(calcRateChange(current.getOverdueRate(), lastYearReport != null ? lastYearReport.getOverdueRate() : null));
+            bc.setOverdueRateMoM(calcRateChange(current.getOverdueRate(), prevReport != null ? prevReport.getOverdueRate() : null));
+
+            branchComparisons.add(bc);
+        }
+        dto.setBranchComparisons(branchComparisons);
+
+        // --- Trend Data ---
+        Long trendBranchId = branchId;
+        List<DashboardDTO.TrendItem> contributionTrend = new ArrayList<>();
+        List<DashboardDTO.TrendItem> withdrawalTrend = new ArrayList<>();
+        List<DashboardDTO.TrendItem> loanTrend = new ArrayList<>();
+        List<DashboardDTO.TrendItem> overdueTrend = new ArrayList<>();
+
+        for (int i = 0; i < months; i++) {
+            YearMonth ym = startYm.plusMonths(i);
+            FundReport monthReport = findLatestReportInMonth(allReports, trendBranchId, ym);
+            FundReport lastYearMonthReport = findLatestReportInMonth(allReports, trendBranchId, ym.minusYears(1));
+            FundReport prevMonthReport = findLatestReportInMonth(allReports, trendBranchId, ym.minusMonths(1));
+
+            DashboardDTO.TrendItem contribItem = new DashboardDTO.TrendItem();
+            contribItem.setDate(ym.toString());
+            contribItem.setContribution(monthReport != null ? monthReport.getMonthlyContribution() : BigDecimal.ZERO);
+            contribItem.setContributionYoY(calcYoY(
+                    monthReport != null ? monthReport.getMonthlyContribution() : null,
+                    lastYearMonthReport != null ? lastYearMonthReport.getMonthlyContribution() : null));
+            contribItem.setContributionMoM(calcMoM(
+                    monthReport != null ? monthReport.getMonthlyContribution() : null,
+                    prevMonthReport != null ? prevMonthReport.getMonthlyContribution() : null));
+            contributionTrend.add(contribItem);
+
+            DashboardDTO.TrendItem withItem = new DashboardDTO.TrendItem();
+            withItem.setDate(ym.toString());
+            withItem.setWithdrawal(monthReport != null ? monthReport.getMonthlyWithdrawal() : BigDecimal.ZERO);
+            withItem.setWithdrawalYoY(calcYoY(
+                    monthReport != null ? monthReport.getMonthlyWithdrawal() : null,
+                    lastYearMonthReport != null ? lastYearMonthReport.getMonthlyWithdrawal() : null));
+            withItem.setWithdrawalMoM(calcMoM(
+                    monthReport != null ? monthReport.getMonthlyWithdrawal() : null,
+                    prevMonthReport != null ? prevMonthReport.getMonthlyWithdrawal() : null));
+            withdrawalTrend.add(withItem);
+
+            DashboardDTO.TrendItem loanItem = new DashboardDTO.TrendItem();
+            loanItem.setDate(ym.toString());
+            loanItem.setLoan(monthReport != null ? monthReport.getMonthlyLoanIssue() : BigDecimal.ZERO);
+            loanItem.setLoanYoY(calcYoY(
+                    monthReport != null ? monthReport.getMonthlyLoanIssue() : null,
+                    lastYearMonthReport != null ? lastYearMonthReport.getMonthlyLoanIssue() : null));
+            loanItem.setLoanMoM(calcMoM(
+                    monthReport != null ? monthReport.getMonthlyLoanIssue() : null,
+                    prevMonthReport != null ? prevMonthReport.getMonthlyLoanIssue() : null));
+            loanTrend.add(loanItem);
+
+            DashboardDTO.TrendItem overdueItem = new DashboardDTO.TrendItem();
+            overdueItem.setDate(ym.toString());
+            overdueItem.setOverdueRate(monthReport != null ? monthReport.getOverdueRate() : BigDecimal.ZERO);
+            overdueItem.setOverdueRateYoY(calcRateChange(
+                    monthReport != null ? monthReport.getOverdueRate() : null,
+                    lastYearMonthReport != null ? lastYearMonthReport.getOverdueRate() : null));
+            overdueItem.setOverdueRateMoM(calcRateChange(
+                    monthReport != null ? monthReport.getOverdueRate() : null,
+                    prevMonthReport != null ? prevMonthReport.getOverdueRate() : null));
+            overdueTrend.add(overdueItem);
+        }
+
+        dto.setContributionTrend(contributionTrend);
+        dto.setWithdrawalTrend(withdrawalTrend);
+        dto.setLoanTrend(loanTrend);
+        dto.setOverdueTrend(overdueTrend);
+
+        // --- Overdue Summary ---
+        FundReport latestTotal = findLatestReportInMonth(allReports, null, latestYm);
+        if (latestTotal != null) {
+            DashboardDTO.OverdueSummary os = new DashboardDTO.OverdueSummary();
+
+            LambdaQueryWrapper<LoanAccount> activeLaWrapper = new LambdaQueryWrapper<>();
+            activeLaWrapper.ne(LoanAccount::getRepaymentStatus, RepaymentStatusEnum.PAID.getCode());
+            Long activeLoanCount = loanAccountMapper.selectCount(activeLaWrapper);
+            os.setTotalLoanCount(activeLoanCount != null ? activeLoanCount.intValue() : 0);
+
+            os.setOverdueLoanCount(latestTotal.getOverdueLoanCount());
+            os.setTotalLoanBalance(latestTotal.getTotalLoanBalance());
+            os.setOverdueLoanAmount(latestTotal.getOverdueLoanAmount());
+            os.setOverdueRate(latestTotal.getOverdueRate());
+
+            FundReport prevTotal = findLatestReportInMonth(allReports, null, prevYm);
+            FundReport lastYearTotal = findLatestReportInMonth(allReports, null, lastYearYm);
+            os.setOverdueRateYoY(calcRateChange(latestTotal.getOverdueRate(),
+                    lastYearTotal != null ? lastYearTotal.getOverdueRate() : null));
+            os.setOverdueRateMoM(calcRateChange(latestTotal.getOverdueRate(),
+                    prevTotal != null ? prevTotal.getOverdueRate() : null));
+
+            dto.setOverdueSummary(os);
+        }
+
+        return dto;
+    }
+
+    private FundReport findLatestReportInMonth(List<FundReport> reports, Long branchId, YearMonth ym) {
+        LocalDate mStart = ym.atDay(1);
+        LocalDate mEnd = ym.atEndOfMonth();
+        FundReport result = null;
+        for (FundReport r : reports) {
+            if (branchId == null && !"TOTAL".equals(r.getReportType())) continue;
+            if (branchId != null && !branchId.equals(r.getBranchId())) continue;
+            if (r.getReportDate().isBefore(mStart) || r.getReportDate().isAfter(mEnd)) continue;
+            if (result == null || r.getReportDate().isAfter(result.getReportDate())) {
+                result = r;
+            }
+        }
+        return result;
+    }
+
+    private BigDecimal calcYoY(BigDecimal current, BigDecimal lastYear) {
+        if (current == null || lastYear == null || lastYear.compareTo(BigDecimal.ZERO) == 0) return null;
+        return current.subtract(lastYear)
+                .divide(lastYear, 4, RoundingMode.HALF_UP)
+                .multiply(new BigDecimal("100"));
+    }
+
+    private BigDecimal calcMoM(BigDecimal current, BigDecimal previous) {
+        if (current == null || previous == null || previous.compareTo(BigDecimal.ZERO) == 0) return null;
+        return current.subtract(previous)
+                .divide(previous, 4, RoundingMode.HALF_UP)
+                .multiply(new BigDecimal("100"));
+    }
+
+    private BigDecimal calcRateChange(BigDecimal current, BigDecimal previous) {
+        if (current == null || previous == null) return null;
+        return current.subtract(previous);
     }
 }

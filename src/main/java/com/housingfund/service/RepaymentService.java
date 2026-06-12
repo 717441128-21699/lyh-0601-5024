@@ -5,6 +5,8 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.housingfund.common.BusinessException;
 import com.housingfund.common.ErrorCode;
 import com.housingfund.config.HousingFundConfig;
+import com.housingfund.dto.EarlyRepaymentDTO;
+import com.housingfund.dto.EarlyRepaymentResultDTO;
 import com.housingfund.dto.RepaymentDTO;
 import com.housingfund.dto.RepaymentPlanResultDTO;
 import com.housingfund.entity.*;
@@ -35,6 +37,7 @@ public class RepaymentService {
     private final CollectionTaskMapper collectionTaskMapper;
     private final EmployeeMapper employeeMapper;
     private final NotificationService notificationService;
+    private final FundAccountService fundAccountService;
 
     @Transactional(rollbackFor = Exception.class)
     public LoanAccount createLoanAccount(LoanApplication application) {
@@ -483,5 +486,227 @@ public class RepaymentService {
 
         Page<CollectionTask> page = new Page<>(pageNum, pageSize);
         return collectionTaskMapper.selectPage(page, wrapper);
+    }
+
+    public EarlyRepaymentResultDTO previewEarlyRepayment(EarlyRepaymentDTO dto) {
+        return buildEarlyRepaymentResult(dto, true);
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public EarlyRepaymentResultDTO processEarlyRepayment(EarlyRepaymentDTO dto) {
+        return buildEarlyRepaymentResult(dto, false);
+    }
+
+    private EarlyRepaymentResultDTO buildEarlyRepaymentResult(EarlyRepaymentDTO dto, boolean previewOnly) {
+        LoanAccount account = loanAccountMapper.selectById(dto.getLoanAccountId());
+        if (account == null) {
+            throw new BusinessException(ErrorCode.ENTITY_NOT_FOUND, "贷款账户不存在");
+        }
+        if (account.getRepaymentStatus().equals(RepaymentStatusEnum.PAID.getCode())) {
+            throw new BusinessException(ErrorCode.BUSINESS_VALIDATION_FAILED, "贷款已结清，无法提前还款");
+        }
+
+        LambdaQueryWrapper<RepaymentPlan> pendingWrapper = new LambdaQueryWrapper<>();
+        pendingWrapper.eq(RepaymentPlan::getLoanAccountId, account.getId())
+                .eq(RepaymentPlan::getRepaymentStatus, RepaymentStatusEnum.PENDING.getCode())
+                .orderByAsc(RepaymentPlan::getTermNo);
+        List<RepaymentPlan> pendingPlans = repaymentPlanMapper.selectList(pendingWrapper);
+
+        if (pendingPlans.isEmpty()) {
+            throw new BusinessException(ErrorCode.BUSINESS_VALIDATION_FAILED, "无待还期数，无需提前还款");
+        }
+
+        int paidTerm = account.getPaidTerm() != null ? account.getPaidTerm() : 0;
+        int remainingTermBefore = account.getLoanTerm() - paidTerm;
+        BigDecimal remainingPrincipal = account.getRemainingPrincipal();
+
+        boolean isFull = "FULL".equalsIgnoreCase(dto.getRepaymentType());
+        BigDecimal earlyRepaymentAmount;
+        if (isFull) {
+            earlyRepaymentAmount = remainingPrincipal;
+        } else {
+            if (dto.getRepaymentAmount() == null || dto.getRepaymentAmount().compareTo(BigDecimal.ZERO) <= 0) {
+                throw new BusinessException(ErrorCode.REPAYMENT_AMOUNT_ERROR, "部分提前还款金额必须大于0");
+            }
+            if (dto.getRepaymentAmount().compareTo(remainingPrincipal) >= 0) {
+                throw new BusinessException(ErrorCode.REPAYMENT_AMOUNT_ERROR, "部分提前还款金额不能大于等于剩余本金");
+            }
+            earlyRepaymentAmount = dto.getRepaymentAmount();
+        }
+
+        BigDecimal remainingPrincipalAfter = remainingPrincipal.subtract(earlyRepaymentAmount);
+        BigDecimal oldMonthlyPayment = calculateOldMonthlyPayment(account);
+        BigDecimal oldRemainingInterest = calculateRemainingInterest(pendingPlans);
+
+        EarlyRepaymentResultDTO result = new EarlyRepaymentResultDTO();
+        result.setLoanAccountId(account.getId());
+        result.setEarlyRepaymentAmount(earlyRepaymentAmount);
+        result.setRemainingPrincipalBefore(remainingPrincipal);
+        result.setRemainingPrincipalAfter(remainingPrincipalAfter);
+        result.setRemainingTermBefore(remainingTermBefore);
+        result.setRepaymentType(dto.getRepaymentType());
+        result.setOldMonthlyPayment(oldMonthlyPayment);
+
+        if (isFull) {
+            result.setRemainingTermAfter(0);
+            result.setNewMonthlyPayment(BigDecimal.ZERO);
+            result.setSavedInterest(oldRemainingInterest);
+            result.setNewPlanItems(new ArrayList<>());
+
+            if (!previewOnly) {
+                for (RepaymentPlan plan : pendingPlans) {
+                    plan.setPaidPrincipal(plan.getPrincipalAmount());
+                    plan.setPaidInterest(plan.getInterestAmount());
+                    plan.setActualPayTime(LocalDateTime.now());
+                    plan.setRepaymentStatus(RepaymentStatusEnum.PAID.getCode());
+                    repaymentPlanMapper.updateById(plan);
+                }
+
+                account.setPaidPrincipal(account.getPaidPrincipal().add(remainingPrincipal));
+                account.setRemainingPrincipal(BigDecimal.ZERO);
+                account.setRemainingInterest(BigDecimal.ZERO);
+                account.setPaidTerm(account.getLoanTerm());
+                account.setRepaymentStatus(RepaymentStatusEnum.PAID.getCode());
+                account.setSettlementTime(LocalDateTime.now());
+                account.setLastRepaymentDate(LocalDate.now());
+                loanAccountMapper.updateById(account);
+
+                deductFromFundAccount(account, earlyRepaymentAmount);
+                sendEarlyRepaymentNotification(account, true, earlyRepaymentAmount, BigDecimal.ZERO, 0);
+            }
+        } else {
+            int newRemainingTerm;
+            if (dto.getReduceTermMonths() != null && dto.getReduceTermMonths() > 0) {
+                newRemainingTerm = remainingTermBefore - dto.getReduceTermMonths();
+                if (newRemainingTerm < 1) {
+                    throw new BusinessException(ErrorCode.BUSINESS_VALIDATION_FAILED, "缩短期数后剩余期数不能小于1");
+                }
+            } else {
+                newRemainingTerm = remainingTermBefore;
+            }
+
+            LocalDate nextDueDate = pendingPlans.get(0).getDueDate();
+            List<RepaymentPlan> newPlans = calculateEqualInstallmentPlan(
+                    remainingPrincipalAfter, account.getInterestRate(),
+                    newRemainingTerm, nextDueDate);
+
+            BigDecimal newMonthlyPayment = newPlans.isEmpty() ? BigDecimal.ZERO : newPlans.get(0).getTotalAmount();
+            BigDecimal newRemainingInterest = newPlans.stream()
+                    .map(RepaymentPlan::getInterestAmount)
+                    .reduce(BigDecimal.ZERO, BigDecimal::add);
+            BigDecimal savedInterest = oldRemainingInterest.subtract(newRemainingInterest).max(BigDecimal.ZERO);
+
+            result.setRemainingTermAfter(newRemainingTerm);
+            result.setNewMonthlyPayment(newMonthlyPayment);
+            result.setSavedInterest(savedInterest);
+
+            List<RepaymentPlanResultDTO.PlanItem> planItems = new ArrayList<>();
+            BigDecimal rp = remainingPrincipalAfter;
+            for (RepaymentPlan p : newPlans) {
+                RepaymentPlanResultDTO.PlanItem item = new RepaymentPlanResultDTO.PlanItem();
+                item.setTermNo(p.getTermNo());
+                item.setDueDate(p.getDueDate());
+                item.setPrincipalAmount(p.getPrincipalAmount());
+                item.setInterestAmount(p.getInterestAmount());
+                item.setTotalAmount(p.getTotalAmount());
+                rp = rp.subtract(p.getPrincipalAmount());
+                item.setRemainingPrincipal(rp.max(BigDecimal.ZERO));
+                planItems.add(item);
+            }
+            result.setNewPlanItems(planItems);
+
+            if (!previewOnly) {
+                for (RepaymentPlan plan : pendingPlans) {
+                    repaymentPlanMapper.deleteById(plan.getId());
+                }
+
+                int termNoBase = paidTerm;
+                for (int i = 0; i < newPlans.size(); i++) {
+                    RepaymentPlan plan = newPlans.get(i);
+                    plan.setLoanAccountId(account.getId());
+                    plan.setLoanAccountNo(account.getLoanAccountNo());
+                    plan.setEmployeeId(account.getEmployeeId());
+                    plan.setBranchId(account.getBranchId());
+                    plan.setTermNo(termNoBase + i + 1);
+                    plan.setPaidPrincipal(BigDecimal.ZERO);
+                    plan.setPaidInterest(BigDecimal.ZERO);
+                    plan.setPenaltyAmount(BigDecimal.ZERO);
+                    plan.setPaidPenalty(BigDecimal.ZERO);
+                    plan.setOverdueDays(0);
+                    plan.setRepaymentStatus(RepaymentStatusEnum.PENDING.getCode());
+                    plan.setReminderSent(0);
+                    plan.setStatus(1);
+                    repaymentPlanMapper.insert(plan);
+                }
+
+                BigDecimal paidInterestForEarlyRepayment = earlyRepaymentAmount.multiply(account.getInterestRate())
+                        .divide(BigDecimal.valueOf(12), 2, RoundingMode.HALF_UP);
+
+                account.setPaidPrincipal(account.getPaidPrincipal().add(earlyRepaymentAmount));
+                account.setRemainingPrincipal(remainingPrincipalAfter);
+                account.setRemainingInterest(newRemainingInterest);
+                account.setPaidInterest(account.getPaidInterest().add(paidInterestForEarlyRepayment));
+                account.setLastRepaymentDate(LocalDate.now());
+                loanAccountMapper.updateById(account);
+
+                deductFromFundAccount(account, earlyRepaymentAmount);
+                sendEarlyRepaymentNotification(account, false, earlyRepaymentAmount, newMonthlyPayment, newRemainingTerm);
+            }
+        }
+
+        log.info("提前还款{}完成: loanAccountId={}, type={}, amount={}",
+                previewOnly ? "预览" : "处理", account.getId(), dto.getRepaymentType(), earlyRepaymentAmount);
+        return result;
+    }
+
+    private BigDecimal calculateOldMonthlyPayment(LoanAccount account) {
+        int remainingTerm = account.getLoanTerm() - (account.getPaidTerm() != null ? account.getPaidTerm() : 0);
+        if (remainingTerm <= 0) return BigDecimal.ZERO;
+        BigDecimal monthlyRate = account.getInterestRate().divide(BigDecimal.valueOf(12), 10, RoundingMode.HALF_UP);
+        if (monthlyRate.compareTo(BigDecimal.ZERO) == 0) {
+            return account.getRemainingPrincipal().divide(BigDecimal.valueOf(remainingTerm), 2, RoundingMode.HALF_UP);
+        }
+        BigDecimal factor = BigDecimal.ONE.add(monthlyRate).pow(remainingTerm);
+        return account.getRemainingPrincipal().multiply(monthlyRate).multiply(factor)
+                .divide(factor.subtract(BigDecimal.ONE), 2, RoundingMode.HALF_UP);
+    }
+
+    private BigDecimal calculateRemainingInterest(List<RepaymentPlan> pendingPlans) {
+        return pendingPlans.stream()
+                .map(RepaymentPlan::getInterestAmount)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+    }
+
+    private void deductFromFundAccount(LoanAccount account, BigDecimal amount) {
+        FundAccount fundAccount = fundAccountService.getEmployeeFundAccount(account.getEmployeeId());
+        if (fundAccount == null) {
+            throw new BusinessException(ErrorCode.ENTITY_NOT_FOUND, "员工公积金账户不存在");
+        }
+        fundAccountService.freezeAmount(fundAccount.getId(), amount,
+                account.getId(), "EARLY_REPAYMENT", account.getLoanAccountNo(), "SYSTEM");
+        fundAccountService.deductFrozenAmount(fundAccount.getId(), amount,
+                account.getId(), "EARLY_REPAYMENT", account.getLoanAccountNo(), "SYSTEM");
+    }
+
+    private void sendEarlyRepaymentNotification(LoanAccount account, boolean isFull,
+                                                 BigDecimal amount, BigDecimal newMonthlyPayment, int newRemainingTerm) {
+        Employee employee = employeeMapper.selectById(account.getEmployeeId());
+        if (employee == null) return;
+
+        String title = isFull ? "全额提前还款成功通知" : "部分提前还款成功通知";
+        String content;
+        if (isFull) {
+            content = String.format("【%s】您好，您已成功全额提前还款%.2f元，贷款已结清。",
+                    employee.getName(), amount);
+        } else {
+            content = String.format("【%s】您好，您已成功部分提前还款%.2f元，剩余本金%.2f元，剩余%d期，新月供%.2f元。",
+                    employee.getName(), amount, account.getRemainingPrincipal(), newRemainingTerm, newMonthlyPayment);
+        }
+        notificationService.pushNotification(
+                employee.getId(), "EMPLOYEE", employee.getName(), employee.getPhone(),
+                NotificationTypeEnum.REPAYMENT_REMINDER, title, content,
+                account.getId(), "LOAN_ACCOUNT", account.getLoanAccountNo(),
+                account.getCompanyId(), account.getBranchId()
+        );
     }
 }

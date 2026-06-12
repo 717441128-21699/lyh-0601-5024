@@ -189,7 +189,8 @@ public class ContributionService {
         detailMapper.update(updateDetail, updateWrapper);
 
         approvalService.initApprovalProcess(declarationId, ApplicationTypeEnum.CONTRIBUTION.getCode(),
-                declarationNo, dto.getCompanyId(), company.getCompanyName(), company.getBranchId());
+                declarationNo, dto.getCompanyId(), company.getCompanyName(), company.getBranchId(),
+                declaration.getTotalAmount());
 
         sendDeclarationNotification(company, declaration, "缴存申报已提交");
 

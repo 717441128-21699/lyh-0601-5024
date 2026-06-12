@@ -7,6 +7,7 @@ import com.housingfund.common.ErrorCode;
 import com.housingfund.config.HousingFundConfig;
 import com.housingfund.dto.ApprovalActionDTO;
 import com.housingfund.entity.ApprovalRecord;
+import com.housingfund.entity.ApprovalRuleConfig;
 import com.housingfund.entity.ContributionDeclaration;
 import com.housingfund.entity.LoanApplication;
 import com.housingfund.entity.WithdrawalApplication;
@@ -14,6 +15,7 @@ import com.housingfund.enums.ApprovalStatusEnum;
 import com.housingfund.enums.ApplicationTypeEnum;
 import com.housingfund.enums.NotificationTypeEnum;
 import com.housingfund.mapper.ApprovalRecordMapper;
+import com.housingfund.mapper.ApprovalRuleConfigMapper;
 import com.housingfund.mapper.ContributionDeclarationMapper;
 import com.housingfund.mapper.LoanApplicationMapper;
 import com.housingfund.mapper.WithdrawalApplicationMapper;
@@ -22,7 +24,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 
 @Slf4j
@@ -32,6 +36,7 @@ public class ApprovalService {
 
     private final HousingFundConfig config;
     private final ApprovalRecordMapper approvalRecordMapper;
+    private final ApprovalRuleConfigMapper approvalRuleConfigMapper;
     private final ContributionDeclarationMapper declarationMapper;
     private final WithdrawalApplicationMapper withdrawalMapper;
     private final LoanApplicationMapper loanMapper;
@@ -42,7 +47,62 @@ public class ApprovalService {
 
     @Transactional(rollbackFor = Exception.class)
     public void initApprovalProcess(Long businessId, String businessType, String businessNo,
-                                    Long applicantId, String applicantName, Long branchId) {
+                                    Long applicantId, String applicantName, Long branchId, BigDecimal amount) {
+        List<ApprovalRuleConfig> rules = approvalRuleConfigMapper.findByBusinessType(businessType);
+
+        if (rules != null && !rules.isEmpty()) {
+            initRuleBasedApproval(businessId, businessType, businessNo, applicantId, applicantName, branchId, amount, rules);
+        } else {
+            initDefaultApproval(businessId, businessType, businessNo, applicantId, applicantName, branchId);
+        }
+
+        log.info("审批流程初始化完成: businessId={}, type={}, amount={}", businessId, businessType, amount);
+    }
+
+    private void initRuleBasedApproval(Long businessId, String businessType, String businessNo,
+                                       Long applicantId, String applicantName, Long branchId,
+                                       BigDecimal amount, List<ApprovalRuleConfig> rules) {
+        List<ApprovalRuleConfig> levelConfigs = new ArrayList<>();
+        for (ApprovalRuleConfig rule : rules) {
+            levelConfigs.add(rule);
+            if (Boolean.TRUE.equals(rule.getAutoEscalation())
+                    && rule.getEscalationThreshold() != null
+                    && amount != null && amount.compareTo(rule.getEscalationThreshold()) > 0) {
+                levelConfigs.add(rule);
+            }
+        }
+
+        int totalLevels = levelConfigs.size();
+        int level = 1;
+        for (ApprovalRuleConfig cfg : levelConfigs) {
+            ApprovalRecord record = new ApprovalRecord();
+            record.setApprovalNo("AR" + IdUtil.getSnowflakeNextIdStr());
+            record.setBusinessId(businessId);
+            record.setBusinessType(businessType);
+            record.setBusinessNo(businessNo);
+            record.setApplicantId(applicantId);
+            record.setApplicantName(applicantName);
+            record.setApprovalLevel(level);
+            record.setTotalLevels(totalLevels);
+            record.setApprovalAction(level == 1 ? 1 : 0);
+            record.setApprovalResult(1);
+            record.setSubmitTime(LocalDateTime.now());
+            int timeoutHours = cfg.getTimeoutHours() != null ? cfg.getTimeoutHours() : config.getApproval().getTimeoutHours();
+            record.setDeadlineTime(LocalDateTime.now().plusHours((long) timeoutHours * level));
+            record.setTimeoutEscalated(false);
+            record.setBranchId(branchId);
+            record.setStatus(level == 1 ? 1 : 0);
+            record.setApproverRoleId(cfg.getApproverRoleId());
+            record.setApproverRoleName(cfg.getApproverRoleName());
+            approvalRecordMapper.insert(record);
+            level++;
+        }
+
+        log.info("规则驱动审批初始化: businessId={}, type={}, totalLevels={}", businessId, businessType, totalLevels);
+    }
+
+    private void initDefaultApproval(Long businessId, String businessType, String businessNo,
+                                     Long applicantId, String applicantName, Long branchId) {
         int totalLevels = config.getApproval().getLevels();
         int timeoutHours = config.getApproval().getTimeoutHours();
 
@@ -66,7 +126,7 @@ public class ApprovalService {
             approvalRecordMapper.insert(record);
         }
 
-        log.info("审批流程初始化完成: businessId={}, type={}, levels={}", businessId, businessType, totalLevels);
+        log.info("默认审批初始化: businessId={}, type={}, levels={}", businessId, businessType, totalLevels);
     }
 
     @Transactional(rollbackFor = Exception.class)

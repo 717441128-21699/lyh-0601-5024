@@ -5,6 +5,7 @@ import com.housingfund.common.Result;
 import com.housingfund.dto.LoanApplyDTO;
 import com.housingfund.dto.LoanPreAuditResultDTO;
 import com.housingfund.entity.LoanApplication;
+import com.housingfund.entity.LoanRiskScoreDetail;
 import com.housingfund.service.LoanService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -12,6 +13,8 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
 
 @Tag(name = "贷款申请", description = "连续缴存校验、信用评分、最高额度计算、预审报告生成")
 @RestController
@@ -61,5 +64,12 @@ public class LoanController {
     public Result<LoanApplication> getApplicationDetail(
             @Parameter(description = "申请ID") @PathVariable Long applicationId) {
         return Result.success(loanService.getApplicationDetail(applicationId));
+    }
+
+    @Operation(summary = "查询风控评分明细", description = "审批人员查看连续缴存、信用记录、负债情况、房屋估值各维度扣分明细，追溯额度和利率推算过程")
+    @GetMapping("/risk-score/{applicationId}")
+    public Result<List<LoanRiskScoreDetail>> getRiskScoreDetails(
+            @Parameter(description = "贷款申请ID") @PathVariable Long applicationId) {
+        return Result.success(loanService.getRiskScoreDetails(applicationId));
     }
 }

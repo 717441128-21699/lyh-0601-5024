@@ -8,10 +8,12 @@ import com.housingfund.common.ErrorCode;
 import com.housingfund.config.HousingFundConfig;
 import com.housingfund.dto.LoanApplyDTO;
 import com.housingfund.dto.LoanPreAuditResultDTO;
+import com.housingfund.dto.RiskScoreDimensionDTO;
 import com.housingfund.entity.*;
 import com.housingfund.enums.*;
 import com.housingfund.mapper.EmployeeMapper;
 import com.housingfund.mapper.LoanApplicationMapper;
+import com.housingfund.mapper.LoanRiskScoreDetailMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -22,6 +24,8 @@ import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.List;
 
 @Slf4j
 @Service
@@ -31,6 +35,7 @@ public class LoanService {
     private final HousingFundConfig config;
     private final LoanApplicationMapper loanApplicationMapper;
     private final EmployeeMapper employeeMapper;
+    private final LoanRiskScoreDetailMapper riskScoreDetailMapper;
     private final FundAccountService fundAccountService;
     private final RepaymentService repaymentService;
     private final ApprovalService approvalService;
@@ -59,6 +64,13 @@ public class LoanService {
         result.setContinuousMonths(continuousMonths);
         result.setRequiredMonths(lc.getMinContinuousMonths());
 
+        CreditLevelEnum creditLevel = CreditLevelEnum.getByScore(employee.getCreditScore());
+        result.setCreditLevel(creditLevel.getCode());
+
+        List<RiskScoreDimensionDTO> riskDetails = new ArrayList<>();
+
+        RiskScoreDimensionDTO contributionDim = scoreContribution(continuousMonths, lc);
+        riskDetails.add(contributionDim);
         if (continuousMonths < lc.getMinContinuousMonths()) {
             result.setEligible(false);
             result.getReasons().add(String.format(
@@ -66,9 +78,8 @@ public class LoanService {
                     continuousMonths, lc.getMinContinuousMonths()));
         }
 
-        CreditLevelEnum creditLevel = CreditLevelEnum.getByScore(employee.getCreditScore());
-        result.setCreditLevel(creditLevel.getCode());
-
+        RiskScoreDimensionDTO creditDim = scoreCredit(employee.getCreditScore(), creditLevel);
+        riskDetails.add(creditDim);
         if (creditLevel == CreditLevelEnum.POOR) {
             result.setEligible(false);
             result.getReasons().add(String.format(
@@ -78,15 +89,32 @@ public class LoanService {
 
         FundAccount account = fundAccountService.getEmployeeFundAccount(dto.getEmployeeId());
         BigDecimal balance = account != null ? account.getBalance() : BigDecimal.ZERO;
+        BigDecimal totalDebt = BigDecimal.ZERO;
+        RiskScoreDimensionDTO debtDim = scoreDebt(balance, dto.getApplicationAmount(), dto.getLoanTerm());
+        riskDetails.add(debtDim);
+
+        RiskScoreDimensionDTO houseDim = scoreHouseValuation(dto.getHouseAppraisalValue(), dto.getApplicationAmount(), lc);
+        riskDetails.add(houseDim);
+
+        BigDecimal totalScore = BigDecimal.ZERO;
+        for (RiskScoreDimensionDTO d : riskDetails) {
+            totalScore = totalScore.add(d.getWeightedScore() != null ? d.getWeightedScore() : BigDecimal.ZERO);
+        }
+        result.setRiskScoreDetails(riskDetails);
+        result.setRiskTotalScore(totalScore);
 
         BigDecimal balanceBasedMax = balance.multiply(new BigDecimal("15"))
                 .setScale(2, RoundingMode.HALF_DOWN);
         BigDecimal ltvMax = dto.getHouseAppraisalValue().multiply(lc.getMaxLoanToValue())
                 .setScale(2, RoundingMode.HALF_DOWN);
         result.setMaxLoanToValueAmount(ltvMax);
+        result.setBalanceBasedMax(balanceBasedMax);
+        result.setLtvBasedMax(ltvMax);
+        result.setStatutoryMax(lc.getMaxLoanAmount());
 
         BigDecimal maxAmount = balanceBasedMax.min(ltvMax).min(lc.getMaxLoanAmount());
         BigDecimal creditMultiplier = creditLevel.getMultiplier();
+        result.setCreditMultiplier(creditMultiplier);
         maxAmount = maxAmount.multiply(creditMultiplier).setScale(2, RoundingMode.HALF_DOWN);
         result.setMaxLoanableAmount(maxAmount);
 
@@ -97,22 +125,174 @@ public class LoanService {
                     dto.getApplicationAmount(), maxAmount));
         }
 
-        BigDecimal termFactor = BigDecimal.valueOf(dto.getLoanTerm()).divide(BigDecimal.valueOf(30), 6, RoundingMode.HALF_UP);
         BigDecimal ageAdjustment = BigDecimal.ONE;
         if (employee.getBirthDate() != null) {
             int age = (int) ChronoUnit.YEARS.between(employee.getBirthDate(), LocalDate.now());
             if (age + dto.getLoanTerm() > 65) {
-                ageAdjustment = BigDecimal.valueOf(65 - age).divide(BigDecimal.valueOf(dto.getLoanTerm()), 6, RoundingMode.HALF_UP);
+                ageAdjustment = BigDecimal.valueOf(65 - age)
+                        .divide(BigDecimal.valueOf(dto.getLoanTerm()), 6, RoundingMode.HALF_UP);
                 if (ageAdjustment.compareTo(BigDecimal.ZERO) < 0) ageAdjustment = BigDecimal.ZERO;
             }
         }
+        result.setAgeAdjustment(ageAdjustment);
+        result.setBaseRate(lc.getBaseRate());
 
         BigDecimal finalRate = lc.getBaseRate().multiply(creditMultiplier).multiply(ageAdjustment)
                 .setScale(6, RoundingMode.HALF_UP);
         result.setInterestRate(finalRate);
 
+        String rateTrace = String.format(
+                "执行利率推算：基准利率%.4f × 信用乘数%.2f(%s) × 年龄修正%.4f = %.6f（%.2f%%）",
+                lc.getBaseRate(), creditMultiplier, creditLevel.getDesc(), ageAdjustment,
+                finalRate, finalRate.doubleValue() * 100);
+        result.setRateTrace(rateTrace);
+
         result.setPreAuditReport(generatePreAuditReport(employee, result, dto));
         return result;
+    }
+
+    private RiskScoreDimensionDTO scoreContribution(int continuousMonths, HousingFundConfig.LoanConfig lc) {
+        RiskScoreDimensionDTO dim = new RiskScoreDimensionDTO();
+        dim.setDimensionCode("CONTRIBUTION");
+        dim.setDimensionName("连续缴存");
+        dim.setFullScore(new BigDecimal("30"));
+        dim.setWeight(new BigDecimal("0.30"));
+
+        int required = lc.getMinContinuousMonths();
+        BigDecimal actualScore;
+        String reason;
+
+        if (continuousMonths >= 60) {
+            actualScore = new BigDecimal("30");
+            reason = "连续缴存≥60个月，满分";
+        } else if (continuousMonths >= 36) {
+            actualScore = new BigDecimal("25");
+            reason = String.format("连续缴存%d个月(≥36)，扣5分", continuousMonths);
+        } else if (continuousMonths >= 24) {
+            actualScore = new BigDecimal("20");
+            reason = String.format("连续缴存%d个月(≥24)，扣10分", continuousMonths);
+        } else if (continuousMonths >= required) {
+            actualScore = new BigDecimal("15");
+            reason = String.format("连续缴存%d个月(刚达线%d)，扣15分", continuousMonths, required);
+        } else {
+            actualScore = BigDecimal.ZERO;
+            reason = String.format("连续缴存%d个月，未达要求%d个月，扣30分（一票否决）", continuousMonths, required);
+        }
+
+        dim.setActualScore(actualScore);
+        dim.setDeduction(dim.getFullScore().subtract(actualScore));
+        dim.setDeductionReason(reason);
+        dim.setWeightedScore(actualScore.multiply(dim.getWeight()).setScale(2, RoundingMode.HALF_UP));
+        return dim;
+    }
+
+    private RiskScoreDimensionDTO scoreCredit(Integer creditScore, CreditLevelEnum creditLevel) {
+        RiskScoreDimensionDTO dim = new RiskScoreDimensionDTO();
+        dim.setDimensionCode("CREDIT");
+        dim.setDimensionName("信用记录");
+        dim.setFullScore(new BigDecimal("30"));
+        dim.setWeight(new BigDecimal("0.30"));
+
+        BigDecimal actualScore;
+        String reason;
+
+        if (creditScore >= 780) {
+            actualScore = new BigDecimal("30");
+            reason = String.format("信用评分%d(优秀≥780)，满分", creditScore);
+        } else if (creditScore >= 720) {
+            actualScore = new BigDecimal("25");
+            reason = String.format("信用评分%d(良好≥720)，扣5分", creditScore);
+        } else if (creditScore >= 650) {
+            actualScore = new BigDecimal("18");
+            reason = String.format("信用评分%d(一般≥650)，扣12分", creditScore);
+        } else if (creditScore >= 550) {
+            actualScore = new BigDecimal("8");
+            reason = String.format("信用评分%d(较差≥550)，扣22分", creditScore);
+        } else {
+            actualScore = BigDecimal.ZERO;
+            reason = String.format("信用评分%d(极差<550)，扣30分（一票否决）", creditScore);
+        }
+
+        dim.setActualScore(actualScore);
+        dim.setDeduction(dim.getFullScore().subtract(actualScore));
+        dim.setDeductionReason(reason);
+        dim.setWeightedScore(actualScore.multiply(dim.getWeight()).setScale(2, RoundingMode.HALF_UP));
+        return dim;
+    }
+
+    private RiskScoreDimensionDTO scoreDebt(BigDecimal balance, BigDecimal loanAmount, int loanTerm) {
+        RiskScoreDimensionDTO dim = new RiskScoreDimensionDTO();
+        dim.setDimensionCode("DEBT");
+        dim.setDimensionName("负债情况");
+        dim.setFullScore(new BigDecimal("20"));
+        dim.setWeight(new BigDecimal("0.20"));
+
+        BigDecimal monthlyRepaymentCap = balance.divide(BigDecimal.valueOf(loanTerm), 2, RoundingMode.HALF_UP);
+        BigDecimal debtRatio = BigDecimal.ZERO;
+        if (balance.compareTo(BigDecimal.ZERO) > 0) {
+            debtRatio = loanAmount.divide(balance.multiply(new BigDecimal("15")), 4, RoundingMode.HALF_UP);
+        }
+
+        BigDecimal actualScore;
+        String reason;
+
+        if (debtRatio.compareTo(new BigDecimal("0.5")) <= 0) {
+            actualScore = new BigDecimal("20");
+            reason = String.format("负债比率%.1f%%（≤50%%），余额充足，满分", debtRatio.doubleValue() * 100);
+        } else if (debtRatio.compareTo(new BigDecimal("0.7")) <= 0) {
+            actualScore = new BigDecimal("15");
+            reason = String.format("负债比率%.1f%%（50%%~70%%），扣5分", debtRatio.doubleValue() * 100);
+        } else if (debtRatio.compareTo(BigDecimal.ONE) <= 0) {
+            actualScore = new BigDecimal("8");
+            reason = String.format("负债比率%.1f%%（70%%~100%%），扣12分", debtRatio.doubleValue() * 100);
+        } else {
+            actualScore = new BigDecimal("2");
+            reason = String.format("负债比率%.1f%%（>100%%），扣18分，偿债压力较大", debtRatio.doubleValue() * 100);
+        }
+
+        dim.setActualScore(actualScore);
+        dim.setDeduction(dim.getFullScore().subtract(actualScore));
+        dim.setDeductionReason(reason);
+        dim.setWeightedScore(actualScore.multiply(dim.getWeight()).setScale(2, RoundingMode.HALF_UP));
+        return dim;
+    }
+
+    private RiskScoreDimensionDTO scoreHouseValuation(BigDecimal houseValue, BigDecimal loanAmount,
+                                                      HousingFundConfig.LoanConfig lc) {
+        RiskScoreDimensionDTO dim = new RiskScoreDimensionDTO();
+        dim.setDimensionCode("HOUSE_VALUATION");
+        dim.setDimensionName("房屋估值");
+        dim.setFullScore(new BigDecimal("20"));
+        dim.setWeight(new BigDecimal("0.20"));
+
+        BigDecimal ltv = BigDecimal.ZERO;
+        if (houseValue.compareTo(BigDecimal.ZERO) > 0) {
+            ltv = loanAmount.divide(houseValue, 4, RoundingMode.HALF_UP);
+        }
+
+        BigDecimal actualScore;
+        String reason;
+
+        if (ltv.compareTo(new BigDecimal("0.5")) <= 0) {
+            actualScore = new BigDecimal("20");
+            reason = String.format("贷款价值比%.1f%%（≤50%%），抵押充足，满分", ltv.doubleValue() * 100);
+        } else if (ltv.compareTo(lc.getMaxLoanToValue()) <= 0) {
+            actualScore = new BigDecimal("15");
+            reason = String.format("贷款价值比%.1f%%（合规范围内≤%.0f%%），扣5分",
+                    ltv.doubleValue() * 100, lc.getMaxLoanToValue().doubleValue() * 100);
+        } else if (ltv.compareTo(new BigDecimal("0.8")) <= 0) {
+            actualScore = new BigDecimal("8");
+            reason = String.format("贷款价值比%.1f%%（超标70%%~80%%），扣12分", ltv.doubleValue() * 100);
+        } else {
+            actualScore = new BigDecimal("2");
+            reason = String.format("贷款价值比%.1f%%（>80%%），扣18分，抵押物覆盖不足", ltv.doubleValue() * 100);
+        }
+
+        dim.setActualScore(actualScore);
+        dim.setDeduction(dim.getFullScore().subtract(actualScore));
+        dim.setDeductionReason(reason);
+        dim.setWeightedScore(actualScore.multiply(dim.getWeight()).setScale(2, RoundingMode.HALF_UP));
+        return dim;
     }
 
     private int calculateContinuousMonths(Employee employee) {
@@ -134,27 +314,47 @@ public class LoanService {
         sb.append(String.format("申请人：%s（%s）\n", employee.getName(), employee.getIdCard()));
         sb.append(String.format("申请时间：%s\n", LocalDateTime.now()));
         sb.append("----------------------------------------\n");
-        sb.append("【一、资格审查】\n");
+
+        sb.append("【一、风控评分明细】\n");
+        sb.append(String.format("  风控总分：%.2f / 100.00\n", r.getRiskTotalScore()));
+        sb.append("  ┌──────────────┬──────┬──────┬──────┬────────┬────────────────────────────┐\n");
+        sb.append("  │ 评分维度     │ 满分 │ 得分 │ 扣分 │ 权重   │ 扣分原因                   │\n");
+        sb.append("  ├──────────────┼──────┼──────┼──────┼────────┼────────────────────────────┤\n");
+        for (RiskScoreDimensionDTO d : r.getRiskScoreDetails()) {
+            sb.append(String.format("  │ %-12s │ %4.0f │ %4.0f │ %4.0f │ %.0f%%    │ %-26s │\n",
+                    d.getDimensionName(), d.getFullScore(), d.getActualScore(),
+                    d.getDeduction(), d.getWeight().doubleValue() * 100, d.getDeductionReason()));
+        }
+        sb.append("  └──────────────┴──────┴──────┴──────┴────────┴────────────────────────────┘\n");
+        sb.append(String.format("  ★加权总分：%.2f\n\n", r.getRiskTotalScore()));
+
+        sb.append("【二、资格审查】\n");
         sb.append(String.format("  1. 连续缴存：%d个月（要求≥%d个月） - %s\n",
                 r.getContinuousMonths(), r.getRequiredMonths(),
-                r.getContinuousMonths() >= r.getRequiredMonths() ? "通过" : "不通过"));
+                r.getContinuousMonths() >= r.getRequiredMonths() ? "✓通过" : "✗不通过"));
         sb.append(String.format("  2. 信用评分：%d分（等级：%s） - %s\n",
                 r.getCreditScore(), CreditLevelEnum.valueOf(r.getCreditLevel().toUpperCase()).getDesc(),
-                !"poor".equals(r.getCreditLevel()) ? "通过" : "不通过"));
-        sb.append("【二、额度计算】\n");
-        sb.append(String.format("  1. 账户余额倍数法：最高可贷参考\n"));
-        sb.append(String.format("  2. 房屋评估价（%.2f元）× 成数（%.0f%%）= %.2f元\n",
-                dto.getHouseAppraisalValue(), config.getLoan().getMaxLoanToValue() * 100, r.getMaxLoanToValueAmount()));
-        sb.append(String.format("  3. 信用乘数：%s（倍数%.2f）\n",
-                CreditLevelEnum.valueOf(r.getCreditLevel().toUpperCase()).getDesc(),
-                CreditLevelEnum.valueOf(r.getCreditLevel().toUpperCase()).getMultiplier()));
-        sb.append(String.format("  4. ★综合最高可贷额度：%.2f元\n", r.getMaxLoanableAmount()));
-        sb.append("【三、利率计算】\n");
-        sb.append(String.format("  基准利率：%.4f（%.2f%%）\n",
-                config.getLoan().getBaseRate(), config.getLoan().getBaseRate() * 100));
-        sb.append(String.format("  执行利率：%.4f（%.2f%%）\n", r.getInterestRate(), r.getInterestRate().doubleValue() * 100));
-        sb.append("【四、预审结论】\n");
+                !"poor".equals(r.getCreditLevel()) ? "✓通过" : "✗不通过"));
 
+        sb.append("【三、额度推算过程】\n");
+        sb.append(String.format("  Step1：账户余额(%.2f) × 15 = %.2f元\n",
+                dto.getHouseAppraisalValue() != null ? BigDecimal.ZERO : BigDecimal.ZERO,
+                r.getBalanceBasedMax()));
+        sb.append(String.format("  Step2：房屋评估价(%.2f) × 成数(%.0f%%) = %.2f元\n",
+                dto.getHouseAppraisalValue(), config.getLoan().getMaxLoanToValue().doubleValue() * 100, r.getLtvBasedMax()));
+        sb.append(String.format("  Step3：法定上限 = %.2f元\n", r.getStatutoryMax()));
+        sb.append(String.format("  Step4：三值取低 = %.2f元\n",
+                r.getBalanceBasedMax().min(r.getLtvBasedMax()).min(r.getStatutoryMax())));
+        sb.append(String.format("  Step5：× 信用乘数%.2f(%s) = %.2f元\n",
+                r.getCreditMultiplier(),
+                CreditLevelEnum.valueOf(r.getCreditLevel().toUpperCase()).getDesc(),
+                r.getMaxLoanableAmount()));
+        sb.append(String.format("  ★综合最高可贷额度：%.2f元\n", r.getMaxLoanableAmount()));
+
+        sb.append("【四、利率推算过程】\n");
+        sb.append(String.format("  %s\n", r.getRateTrace()));
+
+        sb.append("【五、预审结论】\n");
         if (r.getEligible()) {
             sb.append(String.format("  ★预审通过：建议批准贷款%.2f元，期限%d年，年利率%.2f%%\n",
                     r.getMaxLoanableAmount().min(dto.getApplicationAmount()),
@@ -169,6 +369,36 @@ public class LoanService {
         sb.append("报告生成时间：").append(LocalDateTime.now()).append("\n");
         sb.append("备注：本报告仅供审批参考，最终以审批结论为准。");
         return sb.toString();
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public void saveRiskScoreDetails(Long applicationId, String applicationNo, Long employeeId,
+                                    List<RiskScoreDimensionDTO> details) {
+        int order = 1;
+        for (RiskScoreDimensionDTO d : details) {
+            LoanRiskScoreDetail entity = new LoanRiskScoreDetail();
+            entity.setLoanApplicationId(applicationId);
+            entity.setApplicationNo(applicationNo);
+            entity.setEmployeeId(employeeId);
+            entity.setDimensionCode(d.getDimensionCode());
+            entity.setDimensionName(d.getDimensionName());
+            entity.setFullScore(d.getFullScore());
+            entity.setActualScore(d.getActualScore());
+            entity.setDeduction(d.getDeduction());
+            entity.setScoreRule(d.getDeductionReason());
+            entity.setDeductionReason(d.getDeductionReason());
+            entity.setSortOrder(order++);
+            entity.setWeight(d.getWeight());
+            entity.setWeightedScore(d.getWeightedScore());
+            riskScoreDetailMapper.insert(entity);
+        }
+    }
+
+    public List<LoanRiskScoreDetail> getRiskScoreDetails(Long applicationId) {
+        LambdaQueryWrapper<LoanRiskScoreDetail> wrapper = new LambdaQueryWrapper<>();
+        wrapper.eq(LoanRiskScoreDetail::getLoanApplicationId, applicationId)
+                .orderByAsc(LoanRiskScoreDetail::getSortOrder);
+        return riskScoreDetailMapper.selectList(wrapper);
     }
 
     @Transactional(rollbackFor = Exception.class)
@@ -217,8 +447,11 @@ public class LoanService {
         application.setStatus(1);
         loanApplicationMapper.insert(application);
 
+        saveRiskScoreDetails(application.getId(), applicationNo, employee.getId(), preAudit.getRiskScoreDetails());
+
         approvalService.initApprovalProcess(application.getId(), ApplicationTypeEnum.LOAN.getCode(),
-                applicationNo, employee.getId(), employee.getName(), employee.getBranchId());
+                applicationNo, employee.getId(), employee.getName(), employee.getBranchId(),
+                dto.getApplicationAmount());
 
         sendLoanNotification(employee, application, "贷款申请已提交，预审通过，等待审批");
 

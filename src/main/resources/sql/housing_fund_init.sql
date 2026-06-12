@@ -397,6 +397,8 @@ CREATE TABLE approval_record (
     applicant_name VARCHAR(50) COMMENT '申请人姓名',
     approver_id BIGINT COMMENT '审批人ID',
     approver_name VARCHAR(50) COMMENT '审批人姓名',
+    approver_role_id BIGINT COMMENT '审批人角色ID',
+    approver_role_name VARCHAR(50) COMMENT '审批人角色名称',
     approval_level INT NOT NULL COMMENT '审批层级',
     total_levels INT NOT NULL COMMENT '审批总层级',
     approval_action TINYINT DEFAULT 0 COMMENT '审批动作 0待处理 1处理中',
@@ -419,6 +421,32 @@ CREATE TABLE approval_record (
     INDEX idx_deadline (deadline_time),
     INDEX idx_timeout (timeout_escalated, approval_result)
 ) ENGINE=InnoDB COMMENT='审批记录表';
+
+DROP TABLE IF EXISTS approval_rule_config;
+CREATE TABLE approval_rule_config (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
+    business_type VARCHAR(30) NOT NULL COMMENT '业务类型: contribution/withdrawal/loan',
+    business_type_name VARCHAR(50) COMMENT '业务类型名称',
+    approval_level INT NOT NULL COMMENT '审批层级',
+    level_name VARCHAR(50) COMMENT '层级名称',
+    approver_role_id BIGINT COMMENT '审批人角色ID',
+    approver_role_name VARCHAR(50) COMMENT '审批人角色名称',
+    amount_threshold DECIMAL(16,2) COMMENT '金额阈值',
+    auto_escalation TINYINT DEFAULT 0 COMMENT '是否自动加签 0否 1是',
+    escalation_threshold DECIMAL(16,2) COMMENT '加签金额阈值(超过此金额自动加签)',
+    timeout_hours INT COMMENT '超时时间(小时)',
+    escalation_type VARCHAR(30) COMMENT '加签类型',
+    sort_order INT DEFAULT 0 COMMENT '排序',
+    status TINYINT DEFAULT 1 COMMENT '状态 1启用 0停用',
+    remark VARCHAR(500) COMMENT '备注',
+    create_time DATETIME COMMENT '创建时间',
+    update_time DATETIME COMMENT '更新时间',
+    create_by VARCHAR(50) COMMENT '创建人',
+    update_by VARCHAR(50) COMMENT '更新人',
+    deleted TINYINT DEFAULT 0 COMMENT '逻辑删除',
+    INDEX idx_business_type (business_type),
+    INDEX idx_approval_level (business_type, approval_level)
+) ENGINE=InnoDB COMMENT='审批规则配置表';
 
 DROP TABLE IF EXISTS collection_task;
 CREATE TABLE collection_task (
@@ -538,7 +566,84 @@ CREATE TABLE notification_record (
 ) ENGINE=InnoDB COMMENT='通知推送记录表';
 
 -- ============================================================
--- 八、初始化数据
+-- 八、风控评分明细表
+-- ============================================================
+
+DROP TABLE IF EXISTS loan_risk_score_detail;
+CREATE TABLE loan_risk_score_detail (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
+    loan_application_id BIGINT NOT NULL COMMENT '贷款申请ID',
+    application_no VARCHAR(32) COMMENT '申请编号',
+    employee_id BIGINT COMMENT '职工ID',
+    dimension_code VARCHAR(30) NOT NULL COMMENT '维度编码: CONTRIBUTION/CREDIT/DEBT/HOUSE_VALUATION',
+    dimension_name VARCHAR(50) NOT NULL COMMENT '维度名称',
+    full_score DECIMAL(8,2) NOT NULL COMMENT '满分',
+    actual_score DECIMAL(8,2) NOT NULL COMMENT '实际得分',
+    deduction DECIMAL(8,2) NOT NULL COMMENT '扣分',
+    score_rule VARCHAR(500) COMMENT '评分规则说明',
+    deduction_reason VARCHAR(500) COMMENT '扣分原因',
+    sort_order INT DEFAULT 0 COMMENT '排序',
+    weight DECIMAL(6,4) COMMENT '权重',
+    weighted_score DECIMAL(8,2) COMMENT '加权得分',
+    create_time DATETIME COMMENT '创建时间',
+    update_time DATETIME COMMENT '更新时间',
+    create_by VARCHAR(50) COMMENT '创建人',
+    update_by VARCHAR(50) COMMENT '更新人',
+    deleted TINYINT DEFAULT 0 COMMENT '逻辑删除',
+    INDEX idx_loan_application_id (loan_application_id),
+    INDEX idx_dimension_code (dimension_code)
+) ENGINE=InnoDB COMMENT='贷款风控评分明细表';
+
+-- ============================================================
+-- 九、审批规则配置表
+-- ============================================================
+
+DROP TABLE IF EXISTS approval_rule_config;
+CREATE TABLE approval_rule_config (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
+    business_type VARCHAR(30) NOT NULL COMMENT '业务类型: contribution/withdrawal/loan',
+    business_type_name VARCHAR(50) NOT NULL COMMENT '业务类型名称',
+    approval_level INT NOT NULL COMMENT '审批层级',
+    level_name VARCHAR(50) COMMENT '层级名称: 如 初审/复审/终审',
+    approver_role_id BIGINT COMMENT '审批人角色ID',
+    approver_role_name VARCHAR(50) COMMENT '审批人角色名称',
+    amount_threshold DECIMAL(16,2) COMMENT '金额阈值(该级审批的最低金额要求)',
+    auto_escalation TINYINT DEFAULT 0 COMMENT '是否自动加签 0否 1是',
+    escalation_threshold DECIMAL(16,2) COMMENT '加签阈值(金额超过此值时自动加签)',
+    escalation_type VARCHAR(30) COMMENT '加签类型: SAME_LEVEL同级加签 UPPER_LEVEL上级加签',
+    timeout_hours INT COMMENT '超时时间(小时)，null则使用系统默认',
+    sort_order INT DEFAULT 0 COMMENT '排序',
+    status TINYINT DEFAULT 1 COMMENT '状态 1启用 0停用',
+    create_time DATETIME COMMENT '创建时间',
+    update_time DATETIME COMMENT '更新时间',
+    create_by VARCHAR(50) COMMENT '创建人',
+    update_by VARCHAR(50) COMMENT '更新人',
+    deleted TINYINT DEFAULT 0 COMMENT '逻辑删除',
+    INDEX idx_business_type (business_type),
+    INDEX idx_approval_level (approval_level)
+) ENGINE=InnoDB COMMENT='审批规则配置表';
+
+-- 修改approval_record表，新增审批人角色字段
+ALTER TABLE approval_record ADD COLUMN approver_role_id BIGINT COMMENT '审批人角色ID' AFTER approver_name;
+ALTER TABLE approval_record ADD COLUMN approver_role_name VARCHAR(50) COMMENT '审批人角色名称' AFTER approver_role_id;
+
+-- ============================================================
+-- 十、审批规则初始化数据
+-- ============================================================
+
+INSERT INTO approval_rule_config (business_type, business_type_name, approval_level, level_name, approver_role_id, approver_role_name, amount_threshold, auto_escalation, escalation_threshold, escalation_type, timeout_hours, sort_order, status) VALUES
+('contribution', '单位缴存申报', 1, '初审', 201, '缴存初审员', 0, 0, NULL, NULL, 4, 1, 1),
+('contribution', '单位缴存申报', 2, '复审', 202, '缴存复审员', 50000, 1, 500000, 'UPPER_LEVEL', 4, 2, 1),
+('contribution', '单位缴存申报', 3, '终审', 203, '缴存终审主管', 200000, 0, NULL, NULL, 4, 3, 1),
+('withdrawal', '个人提取申请', 1, '初审', 301, '提取初审员', 0, 0, NULL, NULL, 4, 1, 1),
+('withdrawal', '个人提取申请', 2, '复审', 302, '提取复审员', 30000, 1, 200000, 'UPPER_LEVEL', 4, 2, 1),
+('withdrawal', '个人提取申请', 3, '终审', 303, '提取终审主管', 100000, 0, NULL, NULL, 4, 3, 1),
+('loan', '贷款申请', 1, '初审', 401, '贷款初审员', 0, 0, NULL, NULL, 4, 1, 1),
+('loan', '贷款申请', 2, '复审', 402, '贷款复审员', 200000, 1, 500000, 'UPPER_LEVEL', 4, 2, 1),
+('loan', '贷款申请', 3, '终审', 403, '贷款终审主管', 500000, 1, 800000, 'UPPER_LEVEL', 4, 3, 1);
+
+-- ============================================================
+-- 十一、初始化数据
 -- ============================================================
 
 INSERT INTO sys_branch (branch_code, branch_name, branch_type, leader, contact_phone, address, sort_order) VALUES
