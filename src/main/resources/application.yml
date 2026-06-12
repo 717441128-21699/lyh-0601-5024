@@ -1,0 +1,83 @@
+server:
+  port: 8080
+  servlet:
+    context-path: /api
+
+spring:
+  application:
+    name: housing-fund-management
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/housing_fund?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: root
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      database: 0
+      timeout: 3000
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 100MB
+  task:
+    scheduling:
+      pool:
+        size: 10
+
+mybatis-plus:
+  mapper-locations: classpath*:mapper/**/*.xml
+  type-aliases-package: com.housingfund.entity
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      id-type: auto
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+housing-fund:
+  contribution:
+    min-base: 2360
+    max-base: 36549
+    min-ratio: 0.05
+    max-ratio: 0.12
+  withdrawal:
+    conditions:
+      purchase:
+        min-months: 12
+        max-ratio: 1.0
+      rent:
+        min-months: 3
+        max-monthly: 1500
+      retire:
+        min-months: 0
+        max-ratio: 1.0
+      serious-illness:
+        min-months: 6
+        max-ratio: 0.9
+  loan:
+    min-continuous-months: 12
+    max-loan-amount: 800000
+    base-rate: 0.031
+    credit-multipliers:
+      excellent: 1.0
+      good: 0.95
+      average: 0.9
+      poor: 0.0
+    max-loan-to-value: 0.7
+  approval:
+    timeout-hours: 4
+    levels: 3
+  repayment:
+    reminder-days-before: 3
+    penalty-rate: 0.0005
+  notification:
+    enabled: true
+
+logging:
+  level:
+    com.housingfund: debug

@@ -1,0 +1,487 @@
+package com.housingfund.service;
+
+import cn.hutool.core.util.IdUtil;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.housingfund.common.BusinessException;
+import com.housingfund.common.ErrorCode;
+import com.housingfund.config.HousingFundConfig;
+import com.housingfund.dto.RepaymentDTO;
+import com.housingfund.dto.RepaymentPlanResultDTO;
+import com.housingfund.entity.*;
+import com.housingfund.enums.NotificationTypeEnum;
+import com.housingfund.enums.RepaymentStatusEnum;
+import com.housingfund.mapper.*;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.List;
+
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class RepaymentService {
+
+    private final HousingFundConfig config;
+    private final LoanAccountMapper loanAccountMapper;
+    private final RepaymentPlanMapper repaymentPlanMapper;
+    private final CollectionTaskMapper collectionTaskMapper;
+    private final EmployeeMapper employeeMapper;
+    private final NotificationService notificationService;
+
+    @Transactional(rollbackFor = Exception.class)
+    public LoanAccount createLoanAccount(LoanApplication application) {
+        String loanAccountNo = "LNA" + IdUtil.getSnowflakeNextIdStr();
+        LocalDate firstRepaymentDate = LocalDate.now().plusMonths(1).withDayOfMonth(20);
+        LocalDate maturityDate = firstRepaymentDate.plusMonths(application.getLoanTerm() - 1L);
+
+        LoanAccount account = new LoanAccount();
+        account.setLoanAccountNo(loanAccountNo);
+        account.setLoanApplicationId(application.getId());
+        account.setApplicationNo(application.getApplicationNo());
+        account.setEmployeeId(application.getEmployeeId());
+        account.setCompanyId(application.getCompanyId());
+        account.setBranchId(application.getBranchId());
+        account.setLoanAmount(application.getApprovedAmount());
+        account.setPaidPrincipal(BigDecimal.ZERO);
+        account.setPaidInterest(BigDecimal.ZERO);
+        account.setRemainingPrincipal(application.getApprovedAmount());
+        BigDecimal totalInterest = calculateTotalInterestEqualInstallment(
+                application.getApprovedAmount(), application.getInterestRate(), application.getLoanTerm());
+        account.setRemainingInterest(totalInterest);
+        account.setInterestRate(application.getInterestRate());
+        account.setLoanTerm(application.getLoanTerm());
+        account.setPaidTerm(0);
+        account.setRepaymentMethod(application.getRepaymentMethod());
+        account.setFirstRepaymentDate(firstRepaymentDate);
+        account.setMaturityDate(maturityDate);
+        account.setTotalPenalty(BigDecimal.ZERO);
+        account.setPaidPenalty(BigDecimal.ZERO);
+        account.setOverdueDays(0);
+        account.setOverdueTimes(0);
+        account.setRepaymentStatus(RepaymentStatusEnum.PENDING.getCode());
+        account.setStatus(1);
+        loanAccountMapper.insert(account);
+        return account;
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public List<RepaymentPlan> generateRepaymentPlan(LoanAccount account) {
+        List<RepaymentPlan> planItems = calculateEqualInstallmentPlan(
+                account.getLoanAmount(), account.getInterestRate(),
+                account.getLoanTerm(), account.getFirstRepaymentDate());
+
+        for (RepaymentPlan plan : planItems) {
+            plan.setLoanAccountId(account.getId());
+            plan.setLoanAccountNo(account.getLoanAccountNo());
+            plan.setEmployeeId(account.getEmployeeId());
+            plan.setBranchId(account.getBranchId());
+            plan.setPaidPrincipal(BigDecimal.ZERO);
+            plan.setPaidInterest(BigDecimal.ZERO);
+            plan.setPenaltyAmount(BigDecimal.ZERO);
+            plan.setPaidPenalty(BigDecimal.ZERO);
+            plan.setOverdueDays(0);
+            plan.setRepaymentStatus(RepaymentStatusEnum.PENDING.getCode());
+            plan.setReminderSent(0);
+            plan.setStatus(1);
+            repaymentPlanMapper.insert(plan);
+        }
+        log.info("还款计划生成完成: loanAccountId={}, 共{}期", account.getId(), planItems.size());
+        return planItems;
+    }
+
+    public RepaymentPlanResultDTO previewRepaymentPlan(BigDecimal loanAmount, BigDecimal annualRate,
+                                                       Integer termMonths, String method, LocalDate startDate) {
+        RepaymentPlanResultDTO result = new RepaymentPlanResultDTO();
+        result.setLoanAmount(loanAmount);
+        result.setInterestRate(annualRate);
+        result.setLoanTerm(termMonths);
+        result.setRepaymentMethod(method);
+
+        LocalDate firstDate = startDate != null ? startDate : LocalDate.now().plusMonths(1).withDayOfMonth(20);
+        result.setFirstRepaymentDate(firstDate);
+        result.setMaturityDate(firstDate.plusMonths(termMonths - 1L));
+
+        List<RepaymentPlan> plans;
+        if ("EQUAL_PRINCIPAL".equalsIgnoreCase(method)) {
+            plans = calculateEqualPrincipalPlan(loanAmount, annualRate, termMonths, firstDate);
+        } else {
+            plans = calculateEqualInstallmentPlan(loanAmount, annualRate, termMonths, firstDate);
+        }
+
+        BigDecimal totalRepayment = BigDecimal.ZERO;
+        BigDecimal totalInterest = BigDecimal.ZERO;
+        List<RepaymentPlanResultDTO.PlanItem> items = new ArrayList<>();
+        BigDecimal remainingPrincipal = loanAmount;
+
+        for (RepaymentPlan p : plans) {
+            RepaymentPlanResultDTO.PlanItem item = new RepaymentPlanResultDTO.PlanItem();
+            item.setTermNo(p.getTermNo());
+            item.setDueDate(p.getDueDate());
+            item.setPrincipalAmount(p.getPrincipalAmount());
+            item.setInterestAmount(p.getInterestAmount());
+            item.setTotalAmount(p.getTotalAmount());
+            remainingPrincipal = remainingPrincipal.subtract(p.getPrincipalAmount());
+            item.setRemainingPrincipal(remainingPrincipal.max(BigDecimal.ZERO));
+            totalRepayment = totalRepayment.add(p.getTotalAmount());
+            totalInterest = totalInterest.add(p.getInterestAmount());
+            items.add(item);
+        }
+
+        result.setTotalRepayment(totalRepayment);
+        result.setTotalInterest(totalInterest);
+        result.setPlanItems(items);
+        return result;
+    }
+
+    private List<RepaymentPlan> calculateEqualInstallmentPlan(BigDecimal principal, BigDecimal annualRate,
+                                                              int months, LocalDate firstDueDate) {
+        List<RepaymentPlan> plans = new ArrayList<>();
+        BigDecimal monthlyRate = annualRate.divide(BigDecimal.valueOf(12), 10, RoundingMode.HALF_UP);
+
+        BigDecimal monthlyPayment;
+        if (monthlyRate.compareTo(BigDecimal.ZERO) == 0) {
+            monthlyPayment = principal.divide(BigDecimal.valueOf(months), 2, RoundingMode.HALF_UP);
+        } else {
+            BigDecimal factor = BigDecimal.ONE.add(monthlyRate).pow(months);
+            monthlyPayment = principal.multiply(monthlyRate).multiply(factor)
+                    .divide(factor.subtract(BigDecimal.ONE), 2, RoundingMode.HALF_UP);
+        }
+
+        BigDecimal remainingPrincipal = principal;
+        for (int i = 1; i <= months; i++) {
+            BigDecimal interest = remainingPrincipal.multiply(monthlyRate)
+                    .setScale(2, RoundingMode.HALF_UP);
+            BigDecimal principalPart;
+
+            if (i == months) {
+                principalPart = remainingPrincipal;
+            } else {
+                principalPart = monthlyPayment.subtract(interest);
+            }
+
+            RepaymentPlan plan = new RepaymentPlan();
+            plan.setTermNo(i);
+            plan.setDueDate(firstDueDate.plusMonths(i - 1L));
+            plan.setPrincipalAmount(principalPart.setScale(2, RoundingMode.HALF_UP));
+            plan.setInterestAmount(interest);
+            plan.setTotalAmount(principalPart.add(interest).setScale(2, RoundingMode.HALF_UP));
+            plans.add(plan);
+
+            remainingPrincipal = remainingPrincipal.subtract(principalPart);
+        }
+        return plans;
+    }
+
+    private List<RepaymentPlan> calculateEqualPrincipalPlan(BigDecimal principal, BigDecimal annualRate,
+                                                            int months, LocalDate firstDueDate) {
+        List<RepaymentPlan> plans = new ArrayList<>();
+        BigDecimal monthlyRate = annualRate.divide(BigDecimal.valueOf(12), 10, RoundingMode.HALF_UP);
+        BigDecimal monthlyPrincipal = principal.divide(BigDecimal.valueOf(months), 2, RoundingMode.HALF_UP);
+
+        BigDecimal remainingPrincipal = principal;
+        for (int i = 1; i <= months; i++) {
+            BigDecimal interest = remainingPrincipal.multiply(monthlyRate)
+                    .setScale(2, RoundingMode.HALF_UP);
+            BigDecimal actualPrincipal = (i == months) ? remainingPrincipal : monthlyPrincipal;
+
+            RepaymentPlan plan = new RepaymentPlan();
+            plan.setTermNo(i);
+            plan.setDueDate(firstDueDate.plusMonths(i - 1L));
+            plan.setPrincipalAmount(actualPrincipal);
+            plan.setInterestAmount(interest);
+            plan.setTotalAmount(actualPrincipal.add(interest));
+            plans.add(plan);
+
+            remainingPrincipal = remainingPrincipal.subtract(actualPrincipal);
+        }
+        return plans;
+    }
+
+    private BigDecimal calculateTotalInterestEqualInstallment(BigDecimal principal, BigDecimal annualRate, int months) {
+        RepaymentPlanResultDTO preview = previewRepaymentPlan(principal, annualRate, months,
+                "EQUAL_INSTALLMENT", null);
+        return preview.getTotalInterest();
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public void processRepayment(RepaymentDTO dto) {
+        RepaymentPlan plan = repaymentPlanMapper.selectById(dto.getRepaymentPlanId());
+        if (plan == null) throw new BusinessException(ErrorCode.ENTITY_NOT_FOUND, "还款计划不存在");
+        if (plan.getRepaymentStatus().equals(RepaymentStatusEnum.PAID.getCode())) {
+            throw new BusinessException(ErrorCode.APPROVAL_ALREADY_PROCESSED, "该期已结清");
+        }
+
+        LoanAccount account = loanAccountMapper.selectById(plan.getLoanAccountId());
+        if (account == null) throw new BusinessException(ErrorCode.ENTITY_NOT_FOUND, "贷款账户不存在");
+
+        LocalDate today = dto.getRepaymentDate() != null ? dto.getRepaymentDate() : LocalDate.now();
+        long overdueDays = ChronoUnit.DAYS.between(plan.getDueDate(), today);
+        if (overdueDays < 0) overdueDays = 0;
+
+        BigDecimal penalty = BigDecimal.ZERO;
+        if (overdueDays > 0 && plan.getOverdueDays() == 0) {
+            penalty = plan.getTotalAmount().multiply(config.getRepayment().getPenaltyRate())
+                    .multiply(BigDecimal.valueOf(overdueDays))
+                    .setScale(2, RoundingMode.HALF_UP);
+            plan.setPenaltyAmount(penalty);
+            plan.setOverdueDays((int) overdueDays);
+
+            account.setOverdueDays(account.getOverdueDays() + (int) overdueDays);
+            account.setOverdueTimes(account.getOverdueTimes() + 1);
+            account.setTotalPenalty(account.getTotalPenalty().add(penalty));
+            account.setRepaymentStatus(RepaymentStatusEnum.OVERDUE.getCode());
+        }
+
+        BigDecimal totalDue = plan.getTotalAmount().add(plan.getPenaltyAmount());
+        BigDecimal payment = dto.getRepaymentAmount();
+        if (payment.compareTo(totalDue) < 0) {
+            throw new BusinessException(ErrorCode.REPAYMENT_AMOUNT_ERROR,
+                    String.format("还款金额不足，应还%.2f元（含罚息%.2f元）", totalDue, plan.getPenaltyAmount()));
+        }
+
+        plan.setPaidPrincipal(plan.getPrincipalAmount());
+        plan.setPaidInterest(plan.getInterestAmount());
+        if (plan.getPenaltyAmount().compareTo(BigDecimal.ZERO) > 0) {
+            plan.setPaidPenalty(plan.getPenaltyAmount());
+        }
+        plan.setActualPayTime(LocalDateTime.now());
+        plan.setRepaymentStatus(RepaymentStatusEnum.PAID.getCode());
+        repaymentPlanMapper.updateById(plan);
+
+        account.setPaidPrincipal(account.getPaidPrincipal().add(plan.getPrincipalAmount()));
+        account.setPaidInterest(account.getPaidInterest().add(plan.getInterestAmount()));
+        account.setRemainingPrincipal(account.getRemainingPrincipal().subtract(plan.getPrincipalAmount()));
+        account.setRemainingInterest(account.getRemainingInterest().subtract(plan.getInterestAmount()));
+        account.setPaidPenalty(account.getPaidPenalty().add(plan.getPaidPenalty()));
+        account.setPaidTerm(account.getPaidTerm() + 1);
+        account.setLastRepaymentDate(today);
+
+        if (account.getRemainingPrincipal().compareTo(BigDecimal.ZERO) <= 0
+                || account.getPaidTerm().equals(account.getLoanTerm())) {
+            account.setRepaymentStatus(RepaymentStatusEnum.PAID.getCode());
+            account.setSettlementTime(LocalDateTime.now());
+        } else {
+            account.setRepaymentStatus(RepaymentStatusEnum.NORMAL.getCode());
+        }
+        loanAccountMapper.updateById(account);
+
+        Employee employee = employeeMapper.selectById(account.getEmployeeId());
+        if (employee != null) {
+            String title = "还款成功通知";
+            String content = String.format("【%s】您好，您第%d期还款已成功，金额%.2f元%s。剩余本金%.2f元，剩余%d期",
+                    employee.getName(), plan.getTermNo(), plan.getTotalAmount(),
+                    plan.getPenaltyAmount().compareTo(BigDecimal.ZERO) > 0
+                            ? String.format("（含罚息%.2f元，逾期%d天）", plan.getPenaltyAmount(), overdueDays) : "",
+                    account.getRemainingPrincipal(),
+                    account.getLoanTerm() - account.getPaidTerm());
+            notificationService.pushNotification(
+                    employee.getId(), "EMPLOYEE", employee.getName(), employee.getPhone(),
+                    NotificationTypeEnum.REPAYMENT_REMINDER, title, content,
+                    account.getId(), "LOAN_ACCOUNT", account.getLoanAccountNo(),
+                    account.getCompanyId(), account.getBranchId()
+            );
+        }
+
+        log.info("还款处理完成: loanAccountId={}, term={}, amount={}",
+                plan.getLoanAccountId(), plan.getTermNo(), plan.getTotalAmount());
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public int processRepaymentReminders() {
+        int daysBefore = config.getRepayment().getReminderDaysBefore();
+        LocalDate reminderDate = LocalDate.now().plusDays(daysBefore);
+        List<RepaymentPlan> plans = repaymentPlanMapper.findPlansForReminder(reminderDate);
+
+        int count = 0;
+        for (RepaymentPlan plan : plans) {
+            try {
+                LoanAccount account = loanAccountMapper.selectById(plan.getLoanAccountId());
+                if (account == null) continue;
+
+                Employee employee = employeeMapper.selectById(account.getEmployeeId());
+                if (employee != null) {
+                    String title = "还款提醒";
+                    String content = String.format("【%s】您好，您的第%d期公积金贷款将于%s到期，应还金额%.2f元（本金%.2f元+利息%.2f元），请确保账户余额充足。",
+                            employee.getName(), plan.getTermNo(), plan.getDueDate(),
+                            plan.getTotalAmount(), plan.getPrincipalAmount(), plan.getInterestAmount());
+                    notificationService.pushNotification(
+                            employee.getId(), "EMPLOYEE", employee.getName(), employee.getPhone(),
+                            NotificationTypeEnum.REPAYMENT_REMINDER, title, content,
+                            plan.getId(), "REPAYMENT_PLAN", plan.getLoanAccountNo(),
+                            account.getCompanyId(), account.getBranchId()
+                    );
+                }
+                repaymentPlanMapper.markReminderSent(plan.getId());
+                count++;
+            } catch (Exception e) {
+                log.error("还款提醒处理失败: planId={}, error={}", plan.getId(), e.getMessage());
+            }
+        }
+        if (count > 0) {
+            log.info("还款提醒处理完成，共{}条", count);
+        }
+        return count;
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public int processOverdueAndCollection() {
+        LocalDate today = LocalDate.now();
+        LambdaQueryWrapper<LoanAccount> accountWrapper = new LambdaQueryWrapper<>();
+        accountWrapper.in(LoanAccount::getRepaymentStatus,
+                RepaymentStatusEnum.PENDING.getCode(),
+                RepaymentStatusEnum.NORMAL.getCode(),
+                RepaymentStatusEnum.OVERDUE.getCode());
+        List<LoanAccount> accounts = loanAccountMapper.selectList(accountWrapper);
+
+        int overdueCount = 0;
+        for (LoanAccount account : accounts) {
+            try {
+                List<RepaymentPlan> overduePlans = repaymentPlanMapper.findOverduePlans(account.getId(), today);
+                if (overduePlans.isEmpty()) continue;
+
+                int totalOverdueDays = 0;
+                BigDecimal totalOverdueAmount = BigDecimal.ZERO;
+                BigDecimal totalOverduePrincipal = BigDecimal.ZERO;
+                BigDecimal totalOverdueInterest = BigDecimal.ZERO;
+                BigDecimal totalPenalty = BigDecimal.ZERO;
+
+                for (RepaymentPlan plan : overduePlans) {
+                    long days = ChronoUnit.DAYS.between(plan.getDueDate(), today);
+                    if (days <= 0) continue;
+
+                    BigDecimal penalty;
+                    if (plan.getPenaltyAmount() == null || plan.getPenaltyAmount().compareTo(BigDecimal.ZERO) == 0) {
+                        penalty = plan.getTotalAmount().multiply(config.getRepayment().getPenaltyRate())
+                                .multiply(BigDecimal.valueOf(days))
+                                .setScale(2, RoundingMode.HALF_UP);
+                        plan.setPenaltyAmount(penalty);
+                    } else {
+                        penalty = plan.getPenaltyAmount();
+                    }
+                    plan.setOverdueDays((int) days);
+                    plan.setRepaymentStatus(RepaymentStatusEnum.OVERDUE.getCode());
+                    repaymentPlanMapper.updateById(plan);
+
+                    totalOverdueDays = Math.max(totalOverdueDays, (int) days);
+                    BigDecimal remainTotal = plan.getTotalAmount().subtract(
+                            plan.getPaidPrincipal().add(plan.getPaidInterest()));
+                    totalOverdueAmount = totalOverdueAmount.add(remainTotal).add(penalty.subtract(plan.getPaidPenalty()));
+                    totalOverduePrincipal = totalOverduePrincipal.add(plan.getPrincipalAmount().subtract(plan.getPaidPrincipal()));
+                    totalOverdueInterest = totalOverdueInterest.add(plan.getInterestAmount().subtract(plan.getPaidInterest()));
+                    totalPenalty = totalPenalty.add(penalty.subtract(plan.getPaidPenalty()));
+                }
+
+                if (totalOverdueDays > 0) {
+                    account.setOverdueDays(totalOverdueDays);
+                    account.setRepaymentStatus(RepaymentStatusEnum.OVERDUE.getCode());
+                    account.setTotalPenalty(account.getTotalPenalty().add(totalPenalty));
+                    loanAccountMapper.updateById(account);
+
+                    createCollectionTask(account, totalOverdueDays, totalOverdueAmount,
+                            totalOverduePrincipal, totalOverdueInterest, totalPenalty);
+
+                    sendOverdueAlert(account, totalOverdueDays, totalOverdueAmount, totalPenalty);
+                    overdueCount++;
+                }
+            } catch (Exception e) {
+                log.error("逾期处理失败: accountId={}, error={}", account.getId(), e.getMessage());
+            }
+        }
+        if (overdueCount > 0) {
+            log.info("逾期及催收处理完成，共{}个账户", overdueCount);
+        }
+        return overdueCount;
+    }
+
+    private void createCollectionTask(LoanAccount account, int overdueDays, BigDecimal totalAmount,
+                                      BigDecimal principal, BigDecimal interest, BigDecimal penalty) {
+        String taskNo = "CT" + IdUtil.getSnowflakeNextIdStr();
+        int taskLevel = overdueDays <= 15 ? 1 : overdueDays <= 30 ? 2 : 3;
+
+        LambdaQueryWrapper<CollectionTask> existing = new LambdaQueryWrapper<>();
+        existing.eq(CollectionTask::getLoanAccountId, account.getId())
+                .in(CollectionTask::getTaskStatus, 0, 1);
+        if (collectionTaskMapper.selectCount(existing) > 0) return;
+
+        CollectionTask task = new CollectionTask();
+        task.setTaskNo(taskNo);
+        task.setLoanAccountId(account.getId());
+        task.setLoanAccountNo(account.getLoanAccountNo());
+        task.setEmployeeId(account.getEmployeeId());
+        Employee emp = employeeMapper.selectById(account.getEmployeeId());
+        if (emp != null) {
+            task.setEmployeeName(emp.getName());
+            task.setEmployeePhone(emp.getPhone());
+        }
+        task.setAssigneeId(1000L + taskLevel);
+        task.setAssigneeName("信贷员-" + (taskLevel == 1 ? "初级" : taskLevel == 2 ? "中级" : "高级"));
+        task.setBranchId(account.getBranchId());
+        task.setOverdueDays(overdueDays);
+        task.setOverdueAmount(totalAmount);
+        task.setOverduePrincipal(principal);
+        task.setOverdueInterest(interest);
+        task.setPenaltyAmount(penalty);
+        task.setTaskLevel(taskLevel);
+        task.setTaskStatus(0);
+        task.setAssignTime(LocalDateTime.now());
+        task.setDeadlineTime(LocalDateTime.now().plusDays(taskLevel == 1 ? 5 : taskLevel == 2 ? 3 : 1));
+        task.setStatus(1);
+        collectionTaskMapper.insert(task);
+
+        notificationService.pushNotification(
+                task.getAssigneeId(), "STAFF", task.getAssigneeName(), null,
+                NotificationTypeEnum.COLLECTION_TASK,
+                "新催收任务分配",
+                String.format("任务编号%s：贷款账户%s，逾期%d天，欠款总额%.2f元（含罚息%.2f元）",
+                        taskNo, account.getLoanAccountNo(), overdueDays, totalAmount, penalty),
+                task.getId(), "COLLECTION", taskNo,
+                null, account.getBranchId()
+        );
+    }
+
+    private void sendOverdueAlert(LoanAccount account, int overdueDays, BigDecimal amount, BigDecimal penalty) {
+        Employee employee = employeeMapper.selectById(account.getEmployeeId());
+        if (employee == null) return;
+
+        String title = "贷款逾期警示通知";
+        String content = String.format("【%s】您好，您的公积金贷款（账户号%s）已逾期%d天，累计欠款%.2f元（含罚息%.2f元），请尽快还款，逾期将影响您的信用记录。",
+                employee.getName(), account.getLoanAccountNo(), overdueDays, amount, penalty);
+        notificationService.pushNotification(
+                employee.getId(), "EMPLOYEE", employee.getName(), employee.getPhone(),
+                NotificationTypeEnum.OVERDUE_ALERT, title, content,
+                account.getId(), "LOAN_ACCOUNT", account.getLoanAccountNo(),
+                account.getCompanyId(), account.getBranchId()
+        );
+    }
+
+    public List<RepaymentPlan> getRepaymentPlans(Long loanAccountId) {
+        LambdaQueryWrapper<RepaymentPlan> wrapper = new LambdaQueryWrapper<>();
+        wrapper.eq(RepaymentPlan::getLoanAccountId, loanAccountId)
+                .orderByAsc(RepaymentPlan::getTermNo);
+        return repaymentPlanMapper.selectList(wrapper);
+    }
+
+    public LoanAccount getLoanAccountDetail(Long loanAccountId) {
+        return loanAccountMapper.selectById(loanAccountId);
+    }
+
+    public Page<CollectionTask> queryCollectionTasks(Long assigneeId, Integer taskStatus,
+                                                     Integer taskLevel, int pageNum, int pageSize) {
+        LambdaQueryWrapper<CollectionTask> wrapper = new LambdaQueryWrapper<>();
+        if (assigneeId != null) wrapper.eq(CollectionTask::getAssigneeId, assigneeId);
+        if (taskStatus != null) wrapper.eq(CollectionTask::getTaskStatus, taskStatus);
+        if (taskLevel != null) wrapper.eq(CollectionTask::getTaskLevel, taskLevel);
+        wrapper.orderByDesc(CollectionTask::getCreateTime);
+
+        Page<CollectionTask> page = new Page<>(pageNum, pageSize);
+        return collectionTaskMapper.selectPage(page, wrapper);
+    }
+}
